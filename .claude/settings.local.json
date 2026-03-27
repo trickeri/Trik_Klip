@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import gui\")",
+      "Bash(where claude:*)",
+      "Bash(find /c/Programming/StreamClipper -name *.jsx -o -name *.js -o -name *.ts -o -name *.tsx)",
+      "Bash(grep -r \"premiere\\\\|track\\\\|banner\\\\|visual\" /c/Programming/StreamClipper --include=*.json --include=*.md)",
+      "Bash(find /c/Programming/StreamClipper -type f ! -path *.git* ! -path *.claude* -name *.py -o -name *.jsx -o -name *.md)",
+      "Bash(.venv/Scripts/python -c \"import torch; print\\(''torch:'', torch.__version__\\); print\\(''CUDA available:'', torch.cuda.is_available\\(\\)\\); print\\(''CUDA version:'', torch.version.cuda\\)\")",
+      "Bash(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader)",
+      "Bash(nvcc --version)",
+      "Bash(.venv/Scripts/pip install:*)",
+      "Bash(.venv/Scripts/python -c \"import torch; print\\(''torch:'', torch.__version__\\); print\\(''CUDA available:'', torch.cuda.is_available\\(\\)\\); print\\(''GPU:'', torch.cuda.get_device_name\\(0\\) if torch.cuda.is_available\\(\\) else ''none''\\)\")",
+      "Bash(python -c \"import pytest; print\\(pytest.__version__\\)\")",
+      "Bash(pip install:*)",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(where python:*)",
+      "Bash(python -m pytest --version)",
+      "Bash(C:ProgramDataanaconda3envsMixtralpython.exe -m pip install pytest)",
+      "Bash(\"C:/ProgramData/anaconda3/envs/Mixtral/python.exe\" -m pip install pytest)",
+      "Bash(.venv/Scripts/python -c \":*)",
+      "Bash(ollama:*)",
+      "WebSearch",
+      "Bash(python -m venv .venv)",
+      "Bash(.venv/Scripts/python clip_finder.py --help)",
+      "Bash(python -c \"import gui; print\\(''''OK''''\\)\")",
+      "Bash(python -c \"import clip_finder; print\\(''''OK''''\\)\")",
+      "Bash(python:*)",
+      "Bash(pip show:*)",
+      "Bash(C:/programming/streamclipper/.venv/Scripts/pip install:*)",
+      "Bash(.venv/Scripts/python -c \"import gui; print\\(''OK''\\)\")"
+    ]
+  }
+}
