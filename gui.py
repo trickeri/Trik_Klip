@@ -471,10 +471,10 @@ class StreamClipperGUI:
         self._notebook.add(_spacer, text=" " * 133, state="disabled")
         s.configure("App.TNotebook.Tab", borderwidth=0)
 
-        # ── About tab ──────────────────────────────────────────────────────
-        _about_tab, about_canvas, about_frame = _make_scroll_tab("About")
-        self._about_frame = about_frame
-        self._build_about_tab(about_frame)
+        # ── About tab (no scroll needed — fixed content) ──────────────────
+        _about_tab = tk.Frame(self._notebook, bg=BG)
+        self._notebook.add(_about_tab, text="About")
+        self._build_about_tab(_about_tab)
 
         # ── Settings tab ─────────────────────────────────────────────────────
         _prefs_tab, prefs_canvas, prefs_frame = _make_scroll_tab("  ⚙  ")
@@ -483,7 +483,7 @@ class StreamClipperGUI:
 
         # tab index → canvas (order must match notebook.add() calls above)
         # 0=Transcribe, 1=Extract, 2=Slice, 3=Spacer, 4=About, 5=Settings
-        _tab_canvases = [trans_canvas, extract_canvas, edit_canvas, None, about_canvas, prefs_canvas]
+        _tab_canvases = [trans_canvas, extract_canvas, edit_canvas, None, None, prefs_canvas]
 
         # Scroll whichever tab canvas is currently visible.
         # Guard: if the event originates from inside the log pane (or any
