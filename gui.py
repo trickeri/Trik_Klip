@@ -468,8 +468,10 @@ class StreamClipperGUI:
         # ── Spacer "tab" to push ⚙ to the right ──────────────────────────────
         # A disabled, unselectable frame with a wide text label acts as a spacer
         # since ttk.Notebook doesn't support right-aligning tabs natively.
+        # Window is fixed at 860px; the three real tabs use ~310px and the
+        # settings tab ~70px, leaving ~480px for the spacer.
         _spacer = tk.Frame(self._notebook, bg=BG)
-        self._notebook.add(_spacer, text=" " * 74, state="disabled")
+        self._notebook.add(_spacer, text=" " * 155, state="disabled")
         s.configure("App.TNotebook.Tab", borderwidth=0)
 
         # ── Settings tab ─────────────────────────────────────────────────────
@@ -3620,7 +3622,10 @@ class LicenseDialog:
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    gate = LicenseDialog()
-    if gate.is_verified:
-        app = StreamClipperGUI()
-        app.run()
+    # License gate only applies to packaged builds (PyInstaller sets sys.frozen)
+    if getattr(sys, "frozen", False):
+        gate = LicenseDialog()
+        if not gate.is_verified:
+            sys.exit(0)
+    app = StreamClipperGUI()
+    app.run()
