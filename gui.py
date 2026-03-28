@@ -482,8 +482,8 @@ class StreamClipperGUI:
         self._prefs_canvas = prefs_canvas
 
         # tab index → canvas (order must match notebook.add() calls above)
-        # index 3 is the spacer (disabled), index 4 is settings
-        _tab_canvases = [trans_canvas, extract_canvas, edit_canvas, None, prefs_canvas]
+        # 0=Transcribe, 1=Extract, 2=Slice, 3=Spacer, 4=About, 5=Settings
+        _tab_canvases = [trans_canvas, extract_canvas, edit_canvas, None, about_canvas, prefs_canvas]
 
         # Scroll whichever tab canvas is currently visible.
         # Guard: if the event originates from inside the log pane (or any
