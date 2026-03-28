@@ -1093,9 +1093,15 @@ class StreamClipperGUI:
 
     def _build_about_tab(self, parent):
         """Build the About tab with profile image, social icons, and message."""
-        from PIL import Image, ImageTk, ImageDraw
+        import webbrowser
+        from PIL import Image, ImageTk
 
         parent.configure(bg=BG)
+
+        # Center everything vertically using an expanding frame
+        parent.pack_propagate(False)
+        center = tk.Frame(parent, bg=BG)
+        center.place(relx=0.5, rely=0.5, anchor="center")
 
         # ── Profile image ───────────────────────────────────────────────
         img_path = Path(__file__).parent / "assets" / "about_profile.png"
@@ -1103,35 +1109,39 @@ class StreamClipperGUI:
             pil_img = Image.open(img_path).convert("RGBA")
             pil_img = pil_img.resize((180, 180), Image.LANCZOS)
             self._about_photo = ImageTk.PhotoImage(pil_img)
-            img_label = tk.Label(parent, image=self._about_photo, bg=BG, bd=0)
-            img_label.pack(pady=(30, 15), anchor="center")
+            img_label = tk.Label(center, image=self._about_photo, bg=BG, bd=0)
+            img_label.pack(pady=(0, 15))
         except Exception:
-            tk.Label(parent, text="[Image not found]", bg=BG, fg=DIM,
-                     font=("Segoe UI", 10)).pack(pady=(30, 15))
+            tk.Label(center, text="[Image not found]", bg=BG, fg=DIM,
+                     font=("Segoe UI", 10)).pack(pady=(0, 15))
 
         # ── Social icons row ────────────────────────────────────────────
-        icon_frame = tk.Frame(parent, bg=BG)
-        icon_frame.pack(pady=(5, 20), anchor="center")
+        icon_frame = tk.Frame(center, bg=BG)
+        icon_frame.pack(pady=(5, 20))
 
-        # Draw simple platform icons as colored shapes on canvas
         socials = [
-            ("YouTube",   "\u25B6", "#7c3aed"),   # play triangle
-            ("Instagram", "\u25CB", "#7c3aed"),    # circle
-            ("Twitch",    "\u25C6", "#7c3aed"),    # diamond
-            ("X",         "\u2715", "#7c3aed"),    # X mark
-            ("TikTok",    "\u266A", "#7c3aed"),    # music note
+            ("YouTube",   "\u25B6", "https://www.youtube.com/@Trikeri"),
+            ("Instagram", "\u25CB", "https://www.instagram.com/trikeri_/"),
+            ("Twitch",    "\u25C6", "https://www.twitch.tv/trikeri_omni"),
+            ("X",         "\u2715", "https://x.com/Trikeri_Omni"),
+            ("TikTok",    "\u266A", "https://www.tiktok.com/@trikeri_omni"),
         ]
 
-        for platform, symbol, color in socials:
+        for platform, symbol, url in socials:
             col = tk.Frame(icon_frame, bg=BG)
             col.pack(side="left", padx=12)
-            tk.Label(
+            icon_lbl = tk.Label(
                 col, text=symbol, font=("Segoe UI", 20), fg=ACCENT,
                 bg=BG, cursor="hand2",
-            ).pack()
-            tk.Label(
+            )
+            icon_lbl.pack()
+            icon_lbl.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+            name_lbl = tk.Label(
                 col, text=platform, font=("Segoe UI", 8), fg=DIM, bg=BG,
-            ).pack(pady=(2, 0))
+                cursor="hand2",
+            )
+            name_lbl.pack(pady=(2, 0))
+            name_lbl.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
 
         # ── Message ─────────────────────────────────────────────────────
         msg = (
@@ -1139,9 +1149,9 @@ class StreamClipperGUI:
             "my reputation bar and give me a follow you chump."
         )
         tk.Label(
-            parent, text=msg, font=("Segoe UI", 11), fg=TEXT, bg=BG,
-            justify="center", wraplength=500,
-        ).pack(pady=(10, 30), anchor="center")
+            center, text=msg, font=("Segoe UI", 11), fg=TEXT, bg=BG,
+            justify="center",
+        ).pack(pady=(10, 0))
 
     def _build_settings_tab(self, parent):
         px = dict(padx=16)
