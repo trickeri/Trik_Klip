@@ -8,6 +8,15 @@ Dependencies (beyond clip_finder requirements):
 
 import os
 import sys
+
+# PyInstaller --windowed sets sys.stdout/stderr to None, which crashes any
+# library that tries to print (e.g. Whisper model loading).  Redirect to
+# devnull so those writes silently succeed.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
+
 import re
 import json
 import queue
