@@ -3494,8 +3494,111 @@ Notes
         self.root.mainloop()
 
 
+# ── License activation dialog ────────────────────────────────────────────────
+
+class LicenseDialog:
+    """Modal dialog that gates access until a valid Gumroad license is entered."""
+
+    def __init__(self):
+        from licensing import verify_license, save_license, load_saved_license
+
+        self._verified = False
+        self._verify = verify_license
+        self._save = save_license
+
+        # Check for existing saved license first
+        saved_key = load_saved_license()
+        if saved_key:
+            result = verify_license(saved_key, increment_uses=False)
+            if result.valid:
+                self._verified = True
+                return
+
+        # No valid saved license — show activation window
+        self._root = tk.Tk()
+        self._root.title("Trik_Klip — Activate License")
+        self._root.geometry("480x300")
+        self._root.resizable(False, False)
+        self._root.configure(bg=BG)
+        self._root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Center on screen
+        self._root.update_idletasks()
+        x = (self._root.winfo_screenwidth() - 480) // 2
+        y = (self._root.winfo_screenheight() - 300) // 2
+        self._root.geometry(f"480x300+{x}+{y}")
+
+        frame = tk.Frame(self._root, bg=BG)
+        frame.pack(expand=True, fill="both", padx=30, pady=20)
+
+        tk.Label(
+            frame, text="Trik_Klip", font=("Segoe UI", 22, "bold"),
+            bg=BG, fg=ACCENT,
+        ).pack(pady=(10, 5))
+
+        tk.Label(
+            frame, text="Enter your Gumroad license key to activate",
+            font=("Segoe UI", 11), bg=BG, fg=DIM,
+        ).pack(pady=(0, 15))
+
+        self._key_var = tk.StringVar()
+        self._entry = tk.Entry(
+            frame, textvariable=self._key_var, font=("Segoe UI", 12),
+            bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT,
+            relief="flat", width=40,
+        )
+        self._entry.pack(ipady=6, pady=(0, 10))
+        self._entry.focus_set()
+        self._entry.bind("<Return>", lambda _: self._activate())
+
+        self._status_label = tk.Label(
+            frame, text="", font=("Segoe UI", 10), bg=BG, fg=ERR,
+        )
+        self._status_label.pack(pady=(0, 10))
+
+        self._btn = tk.Button(
+            frame, text="Activate", font=("Segoe UI", 11, "bold"),
+            bg=ACCENT, fg="white", activebackground=ACCENT2,
+            activeforeground="white", relief="flat", cursor="hand2",
+            command=self._activate, width=20,
+        )
+        self._btn.pack(ipady=4)
+
+        self._root.mainloop()
+
+    def _activate(self):
+        key = self._key_var.get().strip()
+        if not key:
+            self._status_label.config(text="Please enter a license key.", fg=WARN)
+            return
+
+        self._btn.config(state="disabled", text="Verifying...")
+        self._status_label.config(text="", fg=DIM)
+        self._root.update()
+
+        result = self._verify(key, increment_uses=True)
+
+        if result.valid:
+            self._save(key)
+            self._verified = True
+            self._status_label.config(text="License activated!", fg=SUCCESS)
+            self._root.after(600, self._root.destroy)
+        else:
+            self._btn.config(state="normal", text="Activate")
+            self._status_label.config(text=result.message, fg=ERR)
+
+    def _on_close(self):
+        self._root.destroy()
+
+    @property
+    def is_verified(self) -> bool:
+        return self._verified
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    app = StreamClipperGUI()
-    app.run()
+    gate = LicenseDialog()
+    if gate.is_verified:
+        app = StreamClipperGUI()
+        app.run()

@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 *.wav
 streamclipper_profiles.json
+.trik_klip_license
 build_env/
 build/
 dist/
