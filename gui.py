@@ -465,14 +465,16 @@ class StreamClipperGUI:
         self._editing_frame  = edit_frame
         self._editing_canvas = edit_canvas
 
-        # ── Spacer "tab" to push ⚙ to the right ──────────────────────────────
-        # A disabled, unselectable frame with a wide text label acts as a spacer
-        # since ttk.Notebook doesn't support right-aligning tabs natively.
-        # Window is fixed at 860px; the three real tabs use ~310px and the
-        # settings tab ~70px, leaving ~480px for the spacer.
+        # ── Spacer "tab" to push About + ⚙ to the right ────────────────────
+        # Reduced from 155 to account for the new About tab (~75px).
         _spacer = tk.Frame(self._notebook, bg=BG)
-        self._notebook.add(_spacer, text=" " * 155, state="disabled")
+        self._notebook.add(_spacer, text=" " * 133, state="disabled")
         s.configure("App.TNotebook.Tab", borderwidth=0)
+
+        # ── About tab ──────────────────────────────────────────────────────
+        _about_tab, about_canvas, about_frame = _make_scroll_tab("About")
+        self._about_frame = about_frame
+        self._build_about_tab(about_frame)
 
         # ── Settings tab ─────────────────────────────────────────────────────
         _prefs_tab, prefs_canvas, prefs_frame = _make_scroll_tab("  ⚙  ")
@@ -1088,6 +1090,58 @@ class StreamClipperGUI:
 
     from providers import PROVIDERS as _PROVIDERS
     _KNOWN_MODELS = _PROVIDERS["anthropic"]["models"]  # default; updated by provider selection
+
+    def _build_about_tab(self, parent):
+        """Build the About tab with profile image, social icons, and message."""
+        from PIL import Image, ImageTk, ImageDraw
+
+        parent.configure(bg=BG)
+
+        # ── Profile image ───────────────────────────────────────────────
+        img_path = Path(__file__).parent / "assets" / "about_profile.png"
+        try:
+            pil_img = Image.open(img_path).convert("RGBA")
+            pil_img = pil_img.resize((180, 180), Image.LANCZOS)
+            self._about_photo = ImageTk.PhotoImage(pil_img)
+            img_label = tk.Label(parent, image=self._about_photo, bg=BG, bd=0)
+            img_label.pack(pady=(30, 15), anchor="center")
+        except Exception:
+            tk.Label(parent, text="[Image not found]", bg=BG, fg=DIM,
+                     font=("Segoe UI", 10)).pack(pady=(30, 15))
+
+        # ── Social icons row ────────────────────────────────────────────
+        icon_frame = tk.Frame(parent, bg=BG)
+        icon_frame.pack(pady=(5, 20), anchor="center")
+
+        # Draw simple platform icons as colored shapes on canvas
+        socials = [
+            ("YouTube",   "\u25B6", "#7c3aed"),   # play triangle
+            ("Instagram", "\u25CB", "#7c3aed"),    # circle
+            ("Twitch",    "\u25C6", "#7c3aed"),    # diamond
+            ("X",         "\u2715", "#7c3aed"),    # X mark
+            ("TikTok",    "\u266A", "#7c3aed"),    # music note
+        ]
+
+        for platform, symbol, color in socials:
+            col = tk.Frame(icon_frame, bg=BG)
+            col.pack(side="left", padx=12)
+            tk.Label(
+                col, text=symbol, font=("Segoe UI", 20), fg=ACCENT,
+                bg=BG, cursor="hand2",
+            ).pack()
+            tk.Label(
+                col, text=platform, font=("Segoe UI", 8), fg=DIM, bg=BG,
+            ).pack(pady=(2, 0))
+
+        # ── Message ─────────────────────────────────────────────────────
+        msg = (
+            "Made by Trikeri, if you pirated this at least go increase\n"
+            "my reputation bar and give me a follow you chump."
+        )
+        tk.Label(
+            parent, text=msg, font=("Segoe UI", 11), fg=TEXT, bg=BG,
+            justify="center", wraplength=500,
+        ).pack(pady=(10, 30), anchor="center")
 
     def _build_settings_tab(self, parent):
         px = dict(padx=16)

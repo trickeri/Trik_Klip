@@ -19,6 +19,7 @@ for pkg in ['customtkinter', 'whisper', 'torch']:
 # Project data files
 datas += [
     ('fonts/Nulgl_case2-Regular.ttf', 'fonts'),
+    ('assets/about_profile.png', 'assets'),
     ('.env.example', '.'),
 ]
 
