@@ -11,6 +11,9 @@
 ## v1.0.02 (not yet packaged)
 
 - Fixed app not fully shutting down when clicking the X button. Added WM_DELETE_WINDOW handler that signals workers to stop and force-exits the process, preventing zombie threads and lingering ffmpeg subprocesses.
+- Added stdout/stderr None guard in clip_finder.py as defense-in-depth for PyInstaller windowed mode (the gui.py guard may not cover all code paths during import).
+- Made _StdoutProxy.write() and flush() handle None original stdout defensively.
+- Added version number display: "Welcome to Trik_Klip v1.0.02" appears in the output log on startup.
 
 ## v1.0.01
 

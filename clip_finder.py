@@ -13,6 +13,13 @@ Also requires:
 import os
 import re
 import sys
+
+# PyInstaller --windowed sets sys.stdout/stderr to None.  Guard here too
+# so clip_finder works whether launched via gui.py or standalone.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
 import json
 import math
 import tempfile
@@ -193,14 +200,16 @@ def transcribe_audio(wav_path: str, model_size: str = "base",
             def __init__(self, orig):
                 self._orig = orig
             def write(self, text):
-                self._orig.write(text)
+                if self._orig is not None:
+                    self._orig.write(text)
                 m = _ts_re.search(text)
                 if m and total_sec > 0:
                     end_ts = _parse_ts(m.group(2))
                     pct = min(99, int(end_ts / total_sec * 100))
                     progress_cb(pct, m.group(2))
             def flush(self):
-                self._orig.flush()
+                if self._orig is not None:
+                    self._orig.flush()
 
         import sys as _sys
         _orig = _sys.stdout

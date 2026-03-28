@@ -74,6 +74,8 @@ class GuiConsole:
         self._q.put(("log", _RICH_TAG.sub("", str(msg))))
 
 
+VERSION = "1.0.02"
+
 # ── Colour palette ────────────────────────────────────────────────────────────
 
 BG       = "#1e1e2e"
@@ -314,6 +316,7 @@ class StreamClipperGUI:
 
         self._build()
         self._load_profiles()   # populates dropdowns after widgets exist
+        self._q.put(("log", f"Welcome to Trik_Klip v{VERSION}\n"))
         self._poll()
 
     DEFAULT_OUT_DIR = r"D:\Videos\Streams\Clips"
