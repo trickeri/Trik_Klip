@@ -3498,7 +3498,17 @@ Notes
         if total > 1:
             self._paned.sash_place(0, 0, int(total * 0.60))
 
+    def _on_close(self):
+        """Ensure the process fully terminates when the window is closed."""
+        self._cancel.set()                    # signal any running worker to stop
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        os._exit(0)                           # force-kill lingering threads/subprocesses
+
     def run(self):
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(50, self._set_initial_sash)
         self.root.mainloop()
 

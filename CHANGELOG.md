@@ -8,6 +8,10 @@
 
 ---
 
+## v1.0.02 (not yet packaged)
+
+- Fixed app not fully shutting down when clicking the X button. Added WM_DELETE_WINDOW handler that signals workers to stop and force-exits the process, preventing zombie threads and lingering ffmpeg subprocesses.
+
 ## v1.0.01
 
 - Fixed crash on Whisper model load in packaged build. PyInstaller windowed mode sets sys.stdout/stderr to None, causing Whisper to crash when printing progress. Redirected None streams to devnull at startup.
