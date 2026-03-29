@@ -9,6 +9,11 @@
 
 ---
 
+## v1.0.01_c
+
+- Fixed Claude Code subscription fallback not activating when user is out of tokens. The CLI exits 0 with the rate-limit error as plain text in stdout, which bypassed the previous detection. Now checks stdout for rate-limit phrases on exit code 0 and triggers the API fallback correctly.
+- Fixed misleading "No clip suggestions found" when all analysis windows fail. JSON parse failures now track as errors properly, so the user sees "All X windows failed" with the actual error message.
+
 ## v1.0.01_b
 
 - Added "Claude Code (Subscription)" provider: uses `claude -p` CLI so users can analyze clips with their Pro/Max subscription instead of paying API costs. Includes automatic Anthropic API fallback on rate limit.

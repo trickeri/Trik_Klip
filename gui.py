@@ -74,7 +74,7 @@ class GuiConsole:
         self._q.put(("log", _RICH_TAG.sub("", str(msg))))
 
 
-VERSION = "1.0.01_b"
+VERSION = "1.0.01_c"
 
 # ── Colour palette ────────────────────────────────────────────────────────────
 
