@@ -971,6 +971,36 @@ class StreamClipperGUI:
                              justify="left", anchor="w", wraplength=580)
         files_lbl.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 6))
 
+        # Custom editing notes
+        tk.Label(sl_card, text="Editing notes (optional):",
+                 font=("Segoe UI", 8), bg=CARD, fg=DIM, anchor="w"
+                 ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        notes_text = tk.Text(
+            sl_card, height=3, width=40,
+            font=("Segoe UI", 9), bg=ENTRY_BG, fg=TEXT,
+            insertbackground=TEXT, relief="flat",
+            wrap="word", bd=0, padx=6, pady=4,
+        )
+        notes_text.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        notes_text.insert("1.0", "")
+        # Placeholder behaviour
+        _placeholder = "e.g. Keep the part where they talk about X, remove the intro banter..."
+        notes_text.insert("1.0", _placeholder)
+        notes_text.config(fg=DIM)
+
+        def _on_notes_focus_in(e):
+            if notes_text.get("1.0", "end-1c") == _placeholder:
+                notes_text.delete("1.0", "end")
+                notes_text.config(fg=TEXT)
+
+        def _on_notes_focus_out(e):
+            if not notes_text.get("1.0", "end-1c").strip():
+                notes_text.insert("1.0", _placeholder)
+                notes_text.config(fg=DIM)
+
+        notes_text.bind("<FocusIn>", _on_notes_focus_in)
+        notes_text.bind("<FocusOut>", _on_notes_focus_out)
+
         # Buttons
         btn_row = tk.Frame(outer, bg=BG, pady=8)
         btn_row.pack(fill="x", padx=16)
@@ -1000,6 +1030,8 @@ class StreamClipperGUI:
             "clip_dir_var": clip_dir_var,
             "files_lbl": files_lbl,
             "profile_lbl": profile_lbl,
+            "notes_text": notes_text,
+            "notes_placeholder": _placeholder,
             "slice_btn": slice_btn,
             "slice_only_btn": slice_only_btn,
             "premiere_btn": premiere_btn,
@@ -1989,12 +2021,19 @@ Notes
 
         model = self._prof_model.get().strip() or prov_info["default_model"]
 
+        # Read custom editing notes (ignore placeholder text)
+        notes_widget = sec.get("notes_text")
+        placeholder = sec.get("notes_placeholder", "")
+        raw_notes = notes_widget.get("1.0", "end-1c").strip() if notes_widget else ""
+        custom_notes = "" if raw_notes == placeholder else raw_notes
+
         sec["slice_btn"].configure(state="disabled")
         sec["slice_only_btn"].configure(state="disabled")
         sec["premiere_btn"].configure(state="disabled")
         threading.Thread(
             target=self._generate_slices_worker,
-            args=(folder, provider, api_key, model, base_url, premiere, section_id),
+            args=(folder, provider, api_key, model, base_url, premiere,
+                  section_id, custom_notes),
             daemon=True,
         ).start()
 
@@ -2077,7 +2116,8 @@ Notes
     def _generate_slices_worker(self, clip_dir_str: str, provider: str,
                                 api_key: str, model: str = "claude-opus-4-6",
                                 base_url: str = "", premiere: bool = True,
-                                section_id: int = 0):
+                                section_id: int = 0,
+                                custom_notes: str = ""):
         try:
             clip_dir = Path(clip_dir_str)
 
@@ -2100,6 +2140,16 @@ Notes
 
             with open(prompt_path, encoding="utf-8") as f:
                 prompt_text = f.read()
+
+            # Append custom editing notes if provided
+            if custom_notes:
+                prompt_text += (
+                    "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "ADDITIONAL EDITING NOTES FROM THE USER\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "Follow these instructions alongside the standard rules above:\n\n"
+                    f"{custom_notes}\n"
+                )
 
             # Parse clip_start / clip_end from the prompt metadata block
             clip_start, clip_end = self._parse_clip_range_from_prompt(prompt_text)
@@ -2128,6 +2178,9 @@ Notes
             # ── Send prompt to LLM ────────────────────────────────────────────
             from providers import PROVIDERS, make_client
             prov_label = PROVIDERS.get(provider, {}).get("label", provider)
+            if custom_notes:
+                preview = custom_notes[:200] + ("…" if len(custom_notes) > 200 else "")
+                self._q.put(("log", f"  Custom editing notes included:\n    {preview}\n"))
             self._q.put(("log", f"Sending editing prompt to {prov_label} ({model}) …\n"))
             try:
                 client = make_client(provider, api_key, base_url=base_url)
