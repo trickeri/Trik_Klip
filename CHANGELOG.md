@@ -9,6 +9,15 @@
 
 ---
 
+## v1.0.01_b
+
+- Added "Claude Code (Subscription)" provider: uses `claude -p` CLI so users can analyze clips with their Pro/Max subscription instead of paying API costs. Includes automatic Anthropic API fallback on rate limit.
+- Analysis runs 4 windows in parallel when using the Claude Code provider.
+- Claude Code is now the default provider (previously Anthropic API).
+- Added "Custom Search Prompts" section in the Transcribe tab: expandable list of text fields where users can tell the AI what specific things to look for in the transcript.
+- Improved error logging: errors now show exception type, repeated errors are deduplicated after 3 occurrences, and the final summary distinguishes all-failed vs no-clips-found with the last error message displayed.
+- Updated README and release README with Claude Code provider documentation, setup instructions, and troubleshooting.
+
 ## v1.0.01_a
 
 - Fixed crash on Whisper model load in packaged build. PyInstaller windowed mode sets sys.stdout/stderr to None. Added guards in both gui.py and clip_finder.py.
