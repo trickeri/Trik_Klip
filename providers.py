@@ -423,7 +423,8 @@ class LLMClient:
 
         try:
             result = subprocess.run(
-                cmd, input=user, capture_output=True, text=True, timeout=300,
+                cmd, input=user, capture_output=True, text=True,
+                encoding="utf-8", timeout=300,
             )
         except subprocess.TimeoutExpired:
             raise RuntimeError(
