@@ -319,12 +319,44 @@ If there is no compelling clip, return {"has_clip": false}.
 clip_end_offset - clip_start_offset should be between 60 and 180 seconds."""
 
 
-def analyze_chunk(chunk: dict, client, model: str = "claude-opus-4-6") -> Optional[dict]:
+_consecutive_errors = 0
+_last_error_msg = ""
+
+
+def build_system_prompt(custom_prompts: list[str] | None = None) -> str:
+    """Return the analysis system prompt, optionally extended with custom
+    search criteria supplied by the user."""
+    if not custom_prompts:
+        return ANALYSIS_SYSTEM_PROMPT
+    extras = "\n".join(f"- {p.strip()}" for p in custom_prompts if p.strip())
+    if not extras:
+        return ANALYSIS_SYSTEM_PROMPT
+    return (
+        ANALYSIS_SYSTEM_PROMPT
+        + "\n\nThe user has also asked you to look for the following "
+        "specific things in the transcript. Prioritise these alongside "
+        "the standard criteria above:\n"
+        + extras
+    )
+
+
+def analyze_chunk(
+    chunk: dict,
+    client,
+    model: str = "claude-opus-4-6",
+    custom_prompts: list[str] | None = None,
+) -> Optional[dict]:
     """Send a transcript chunk to the LLM for clip analysis.
 
     *client* can be either a ``providers.LLMClient`` (preferred) or a legacy
     ``anthropic.Anthropic`` instance for backward-compatibility.
+    *custom_prompts* is an optional list of user-supplied search criteria
+    to append to the system prompt.
     """
+    global _consecutive_errors, _last_error_msg
+
+    system_prompt = build_system_prompt(custom_prompts)
+
     window_duration = chunk["window_end"] - chunk["window_start"]
     user_prompt = (
         f"Window timestamps: {fmt_time(chunk['window_start'])} → {fmt_time(chunk['window_end'])} "
@@ -338,7 +370,7 @@ def analyze_chunk(chunk: dict, client, model: str = "claude-opus-4-6") -> Option
             raw = client.message(
                 model=model,
                 user_prompt=user_prompt,
-                system_prompt=ANALYSIS_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 max_tokens=600,
             )
         else:
@@ -346,13 +378,26 @@ def analyze_chunk(chunk: dict, client, model: str = "claude-opus-4-6") -> Option
             response = client.messages.create(
                 model=model,
                 max_tokens=600,
-                system=ANALYSIS_SYSTEM_PROMPT,
+                system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}]
             )
             raw = response.content[0].text
     except Exception as exc:
-        console.log(f"[yellow]Warning: API error for chunk at {fmt_time(chunk['window_start'])}: {exc}[/yellow]")
+        exc_type = type(exc).__name__
+        err_str = str(exc)
+        _consecutive_errors += 1
+        # Log full detail for the first 3 failures, then summarise
+        if _consecutive_errors <= 3:
+            console.log(f"[yellow]Warning: {exc_type} for chunk at "
+                         f"{fmt_time(chunk['window_start'])}: {err_str}[/yellow]")
+        elif _consecutive_errors == 4:
+            console.log(f"[yellow]Suppressing further duplicate errors "
+                         f"(same issue repeating)…[/yellow]")
+        _last_error_msg = f"{exc_type}: {err_str}"
         return None
+
+    # Reset consecutive error counter on success
+    _consecutive_errors = 0
 
     raw = raw.strip()
     # Strip any accidental markdown fences
@@ -361,7 +406,11 @@ def analyze_chunk(chunk: dict, client, model: str = "claude-opus-4-6") -> Option
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        console.log(f"[yellow]Warning: Could not parse LLM response for chunk at {fmt_time(chunk['window_start'])}[/yellow]")
+        # Show a preview of what came back so the user can diagnose the issue
+        preview = raw[:200] + ("…" if len(raw) > 200 else "")
+        console.log(f"[yellow]Warning: Could not parse LLM response for chunk "
+                     f"at {fmt_time(chunk['window_start'])}. "
+                     f"Response preview: {preview!r}[/yellow]")
         return None
 
 
@@ -376,6 +425,8 @@ def find_clips(
     padding_seconds: float = 180,
     total_duration: float = 0,
     model: str = "claude-opus-4-6",
+    max_workers: int = 1,
+    custom_prompts: list[str] | None = None,
 ) -> list[ClipSuggestion]:
     """Analyze all chunks and return the top N clip suggestions.
 
@@ -383,7 +434,13 @@ def find_clips(
                      core clip, giving editors room to work (default 3 min).
     total_duration:  total audio length in seconds used to clamp the end of
                      padded clips (pass segments[-1].end).
+    max_workers:     number of parallel analysis threads (>1 useful for
+                     claude_code provider where each call is a subprocess).
+    custom_prompts:  optional list of user-supplied search criteria appended
+                     to the system prompt.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     candidates = []
     rank = 0
 
@@ -397,41 +454,51 @@ def find_clips(
     ) as progress:
         task = progress.add_task("[cyan]Analyzing windows with LLM...", total=len(chunks))
 
-        for chunk in chunks:
-            result = analyze_chunk(chunk, client, model=model)
-            progress.advance(task)
+        def _analyze(chunk):
+            return chunk, analyze_chunk(chunk, client, model=model,
+                                        custom_prompts=custom_prompts)
 
-            if not result or not result.get("has_clip"):
-                continue
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_analyze, c): c for c in chunks}
+            for future in as_completed(futures):
+                try:
+                    chunk, result = future.result()
+                except Exception:
+                    progress.advance(task)
+                    continue
+                progress.advance(task)
 
-            score = result.get("virality_score", 0)
+                if not result or not result.get("has_clip"):
+                    continue
 
-            # Core clip as identified by Claude (clamped to window)
-            core_start = chunk["window_start"] + result.get("clip_start_offset", 0)
-            core_end   = chunk["window_start"] + result.get("clip_end_offset", 60)
-            core_start = max(core_start, chunk["window_start"])
-            core_end   = min(core_end,   chunk["window_end"])
+                score = result.get("virality_score", 0)
 
-            if core_end - core_start < 30:  # Skip tiny fragments
-                continue
+                # Core clip as identified by Claude (clamped to window)
+                core_start = chunk["window_start"] + result.get("clip_start_offset", 0)
+                core_end   = chunk["window_start"] + result.get("clip_end_offset", 60)
+                core_start = max(core_start, chunk["window_start"])
+                core_end   = min(core_end,   chunk["window_end"])
 
-            # Expand with padding for editing headroom
-            clip_start = max(0.0, core_start - padding_seconds)
-            clip_end   = core_end + padding_seconds
-            if total_duration > 0:
-                clip_end = min(clip_end, total_duration)
-            duration = clip_end - clip_start
+                if core_end - core_start < 30:  # Skip tiny fragments
+                    continue
 
-            candidates.append({
-                "chunk": chunk,
-                "result": result,
-                "core_start": core_start,
-                "core_end":   core_end,
-                "clip_start": clip_start,
-                "clip_end":   clip_end,
-                "duration":   duration,
-                "score":      score,
-            })
+                # Expand with padding for editing headroom
+                clip_start = max(0.0, core_start - padding_seconds)
+                clip_end   = core_end + padding_seconds
+                if total_duration > 0:
+                    clip_end = min(clip_end, total_duration)
+                duration = clip_end - clip_start
+
+                candidates.append({
+                    "chunk": chunk,
+                    "result": result,
+                    "core_start": core_start,
+                    "core_end":   core_end,
+                    "clip_start": clip_start,
+                    "clip_end":   clip_end,
+                    "duration":   duration,
+                    "score":      score,
+                })
 
     # Sort by virality score descending, deduplicate on padded ranges
     candidates.sort(key=lambda x: x["score"], reverse=True)

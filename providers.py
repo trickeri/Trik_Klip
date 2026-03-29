@@ -79,6 +79,16 @@ PROVIDERS: dict[str, dict] = {
         ],
         "default_model": "qwen3.5:27b",
     },
+    "claude_code": {
+        "label": "Claude Code (Subscription)",
+        "env_key": "",                          # uses CLI auth, no API key needed
+        "models": [
+            "claude-sonnet-4-6",
+            "claude-opus-4-6",
+            "claude-haiku-4-5-20251001",
+        ],
+        "default_model": "claude-sonnet-4-6",
+    },
 }
 
 
@@ -224,6 +234,13 @@ def refresh_all_models(profiles: dict[str, dict] | None = None):
         refresh_provider_models(prov, key)
 
 
+# ── Exceptions ───────────────────────────────────────────────────────────────
+
+class ClaudeCodeRateLimitError(Exception):
+    """Raised when Claude Code CLI hits subscription rate/usage limits."""
+    pass
+
+
 # ── Unified client ────────────────────────────────────────────────────────────
 
 class LLMClient:
@@ -237,6 +254,11 @@ class LLMClient:
         # Cumulative token usage tracking
         self.input_tokens = 0
         self.output_tokens = 0
+        # Claude Code CLI fallback state
+        self._cc_exhausted = False
+        self._fallback_client = None
+        self.fallback_activated = False
+        self._cc_stderr_warnings: list[str] = []  # stderr output from successful CLI calls
 
     @property
     def total_tokens(self) -> int:
@@ -258,11 +280,12 @@ class LLMClient:
     ) -> str:
         """Send a prompt and return the assistant's text response."""
         dispatch = {
-            "anthropic": self._call_anthropic,
-            "openai":    self._call_openai,
-            "gemini":    self._call_gemini,
-            "grok":      self._call_grok,
-            "ollama":    self._call_ollama,
+            "anthropic":  self._call_anthropic,
+            "openai":     self._call_openai,
+            "gemini":     self._call_gemini,
+            "grok":       self._call_grok,
+            "ollama":     self._call_ollama,
+            "claude_code": self._call_claude_code,
         }
         fn = dispatch.get(self.provider)
         if fn is None:
@@ -376,6 +399,93 @@ class LLMClient:
             self.input_tokens += getattr(resp.usage, "prompt_tokens", 0)
             self.output_tokens += getattr(resp.usage, "completion_tokens", 0)
         return resp.choices[0].message.content
+
+    # -- Claude Code CLI (uses subscription via `claude -p`) -----------------
+
+    def _call_claude_code(self, model, user, system, max_tokens):
+        # If a previous call exhausted the rate limit, go straight to fallback
+        if self._cc_exhausted:
+            return self._call_anthropic_fallback(model, user, system, max_tokens)
+
+        import shutil
+        import subprocess
+
+        claude_path = shutil.which("claude")
+        if not claude_path:
+            raise FileNotFoundError(
+                "Claude Code CLI ('claude') not found on PATH. "
+                "Install it or add it to your PATH. "
+                "See: https://docs.anthropic.com/en/docs/claude-code")
+
+        cmd = [claude_path, "-p", "--model", model]
+        if system:
+            cmd.extend(["--system-prompt", system])
+
+        try:
+            result = subprocess.run(
+                cmd, input=user, capture_output=True, text=True, timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                "Claude Code CLI timed out after 5 minutes. "
+                "This may indicate network issues or an unusually long response.")
+        except OSError as exc:
+            raise RuntimeError(
+                f"Failed to launch Claude Code CLI: {exc}. "
+                f"Is 'claude' installed and on your PATH?")
+
+        if result.returncode != 0:
+            err = result.stderr.strip()
+            stdout = result.stdout.strip()
+            err_lower = (err + " " + stdout).lower()
+            is_rate_limit = any(phrase in err_lower for phrase in (
+                "rate limit", "usage limit", "token limit",
+                "too many requests", "quota", "capacity", "exceeded",
+            ))
+            if is_rate_limit:
+                self._cc_exhausted = True
+                if self.api_key:
+                    self.fallback_activated = True
+                    return self._call_anthropic_fallback(
+                        model, user, system, max_tokens)
+                raise ClaudeCodeRateLimitError(
+                    f"Claude Code rate limit reached and no fallback API "
+                    f"key configured.\n"
+                    f"  stderr: {err}\n"
+                    f"  Add an Anthropic API key in Settings to enable "
+                    f"automatic fallback.")
+            # Include both stderr and stdout for diagnosis
+            detail = err or stdout or "(no output)"
+            raise RuntimeError(
+                f"Claude Code CLI exited with code {result.returncode}: "
+                f"{detail}")
+
+        # Capture stderr warnings even on success (CLI may emit non-fatal
+        # warnings about auth, updates, etc.)
+        stderr = result.stderr.strip()
+        if stderr:
+            self._cc_stderr_warnings.append(stderr)
+
+        return result.stdout.strip()
+
+    # -- Anthropic API fallback (used when Claude Code CLI is rate-limited) ---
+
+    def _call_anthropic_fallback(self, model, user, system, max_tokens):
+        import anthropic
+        if self._fallback_client is None:
+            self._fallback_client = anthropic.Anthropic(api_key=self.api_key)
+        kwargs = dict(
+            model=model,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": user}],
+        )
+        if system:
+            kwargs["system"] = system
+        resp = self._fallback_client.messages.create(**kwargs)
+        if hasattr(resp, "usage") and resp.usage:
+            self.input_tokens += getattr(resp.usage, "input_tokens", 0)
+            self.output_tokens += getattr(resp.usage, "output_tokens", 0)
+        return resp.content[0].text
 
 
 def make_client(provider: str, api_key: str, base_url: str = "") -> LLMClient:

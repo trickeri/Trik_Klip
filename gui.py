@@ -307,9 +307,9 @@ class StreamClipperGUI:
         # ── Profile / Settings state ──
         self._profiles:        dict = {}               # name → {provider, api_key, model, base_url}
         self._prof_name        = tk.StringVar()        # name field in editor
-        self._prof_provider    = tk.StringVar(value="anthropic")
-        self._prof_api_key     = tk.StringVar(value=os.environ.get("ANTHROPIC_API_KEY", ""))  # best-effort default
-        self._prof_model       = tk.StringVar(value="claude-opus-4-6")
+        self._prof_provider    = tk.StringVar(value="claude_code")
+        self._prof_api_key     = tk.StringVar(value=os.environ.get("ANTHROPIC_API_KEY", ""))  # fallback key
+        self._prof_model       = tk.StringVar(value="claude-sonnet-4-6")
         self._prof_base_url    = tk.StringVar(value="http://localhost:11434")
         self._prof_active      = tk.StringVar()        # currently selected profile
         self.transcription_language = tk.StringVar(value="English")  # display name
@@ -530,6 +530,10 @@ class StreamClipperGUI:
         self._section(p, "Options")
         opts = self._card(p)
         self._build_options(opts)
+
+        # ── Custom search prompts ──────────────────────────────────────────
+        self._section(p, "Custom Search Prompts")
+        self._build_custom_prompts(p)
 
         # ── File paths & script loader ─────────────────────────────────────
         self._section(p, "File Paths")
@@ -1089,7 +1093,7 @@ class StreamClipperGUI:
     }
 
     from providers import PROVIDERS as _PROVIDERS
-    _KNOWN_MODELS = _PROVIDERS["anthropic"]["models"]  # default; updated by provider selection
+    _KNOWN_MODELS = _PROVIDERS["claude_code"]["models"]  # default; updated by provider selection
 
     def _build_about_tab(self, parent):
         """Build the About tab with profile image, social icons, and message."""
@@ -1250,7 +1254,7 @@ class StreamClipperGUI:
                                        padx=(0, 8), pady=4)
         provider_labels = [PROVIDERS[k]["label"] for k in PROVIDERS]
         self._provider_keys = list(PROVIDERS.keys())   # keep in sync
-        self._prof_provider_display = tk.StringVar(value=PROVIDERS["anthropic"]["label"])
+        self._prof_provider_display = tk.StringVar(value=PROVIDERS["claude_code"]["label"])
         self._prof_provider_cb = ctk.CTkComboBox(
             ed_card, variable=self._prof_provider_display,
             values=provider_labels, state="readonly",
@@ -1292,7 +1296,7 @@ class StreamClipperGUI:
                       command=self._toggle_prof_key,
                       ).pack(side="left")
         self._prof_api_key_hint = tk.Label(
-            key_btn_frame, text=f"(env: {PROVIDERS['anthropic']['env_key']})",
+            key_btn_frame, text="(optional — Anthropic key for fallback)",
             font=("Segoe UI", 7), bg=CARD, fg=DIM,
         )
         self._prof_api_key_hint.pack(side="left", padx=(6, 0))
@@ -1304,7 +1308,7 @@ class StreamClipperGUI:
                                        padx=(0, 8), pady=4)
         self._prof_model_cb = ctk.CTkComboBox(
             ed_card, variable=self._prof_model,
-            values=PROVIDERS["anthropic"]["models"],
+            values=PROVIDERS["claude_code"]["models"],
             font=("Segoe UI", 9),
             fg_color=ENTRY_BG, border_color=BORDER, button_color=ACCENT,
             button_hover_color=ACCENT2, dropdown_fg_color=ENTRY_BG,
@@ -1336,6 +1340,7 @@ class StreamClipperGUI:
                     self._prof_model_cb.configure(values=info["models"])
                     self._prof_model.set(info["default_model"])
                     is_ollama = (key == "ollama")
+                    is_claude_code = (key == "claude_code")
                     # Toggle Server URL row visibility
                     if is_ollama:
                         self._url_label.grid()
@@ -1352,9 +1357,15 @@ class StreamClipperGUI:
                         self._key_label.grid()
                         self._prof_key_entry.grid()
                         self._key_btn_frame.grid()
-                        self._prof_api_key_hint.config(
-                            text=f"(env: {info['env_key']})")
-                        env_val = os.environ.get(info.get("env_key", ""), "")
+                        if is_claude_code:
+                            self._prof_api_key_hint.config(
+                                text="(optional — Anthropic key for fallback)")
+                            env_val = os.environ.get("ANTHROPIC_API_KEY", "")
+                        else:
+                            self._prof_api_key_hint.config(
+                                text=f"(env: {info['env_key']})")
+                            env_val = os.environ.get(
+                                info.get("env_key", ""), "")
                         if env_val and not self._prof_api_key.get().strip():
                             self._prof_api_key.set(env_val)
                     # Toggle Refresh Models button
@@ -1472,7 +1483,7 @@ class StreamClipperGUI:
         name = self._prof_active.get()
         if name and name in self._profiles:
             p = self._profiles[name]
-            provider = p.get("provider", "anthropic")
+            provider = p.get("provider", "claude_code")
             model = p.get("model", "—")
             from providers import PROVIDERS
             prov_label = PROVIDERS.get(provider, {}).get("label", provider)
@@ -1494,10 +1505,10 @@ class StreamClipperGUI:
         p = self._profiles[name]
         self._prof_name.set(name)
         # Set provider first so the model dropdown & visibility updates
-        provider = p.get("provider", "anthropic")
+        provider = p.get("provider", "claude_code")
         self._prof_provider.set(provider)
         from providers import PROVIDERS
-        info = PROVIDERS.get(provider, PROVIDERS["anthropic"])
+        info = PROVIDERS.get(provider, PROVIDERS["claude_code"])
         self._prof_provider_display.set(info["label"])  # triggers _on_provider_change
         self._prof_base_url.set(p.get("base_url", info.get("base_url", "http://localhost:11434")))
         self._prof_api_key.set(p.get("api_key", ""))
@@ -1506,7 +1517,7 @@ class StreamClipperGUI:
 
     def _save_current_profile(self):
         name     = self._prof_name.get().strip()
-        provider = self._prof_provider.get().strip() or "anthropic"
+        provider = self._prof_provider.get().strip() or "claude_code"
         api_key  = self._prof_api_key.get().strip()
         model    = self._prof_model.get().strip()
         base_url = self._prof_base_url.get().strip()
@@ -1556,9 +1567,9 @@ class StreamClipperGUI:
                     self._prof_active.set(active)
                     p = self._profiles[active]
                     self._prof_name.set(active)
-                    provider = p.get("provider", "anthropic")
+                    provider = p.get("provider", "claude_code")
                     self._prof_provider.set(provider)
-                    info = PROVIDERS.get(provider, PROVIDERS["anthropic"])
+                    info = PROVIDERS.get(provider, PROVIDERS["claude_code"])
                     # Setting display triggers _on_provider_change (shows/hides fields)
                     self._prof_provider_display.set(info["label"])
                     self._prof_base_url.set(
@@ -1589,8 +1600,8 @@ class StreamClipperGUI:
         """Push refreshed model lists into the settings comboboxes."""
         from providers import PROVIDERS
         # Update the model combobox if the currently selected provider has new models
-        provider = self._prof_provider.get().strip() or "anthropic"
-        info = PROVIDERS.get(provider, PROVIDERS["anthropic"])
+        provider = self._prof_provider.get().strip() or "claude_code"
+        info = PROVIDERS.get(provider, PROVIDERS["claude_code"])
         self._prof_model_cb.configure(values=info["models"])
 
     def _save_profiles_file(self):
@@ -1956,8 +1967,8 @@ Notes
 
         from providers import PROVIDERS
 
-        provider = self._prof_provider.get().strip() or "anthropic"
-        prov_info = PROVIDERS.get(provider, PROVIDERS["anthropic"])
+        provider = self._prof_provider.get().strip() or "claude_code"
+        prov_info = PROVIDERS.get(provider, PROVIDERS["claude_code"])
 
         if provider == "ollama":
             api_key = "ollama"
@@ -2720,6 +2731,72 @@ Notes
         tk.Label(pf, text="  added before & after each core clip",
                  font=("Segoe UI", 8), bg=CARD, fg=DIM).pack(side="left")
 
+    # ── Custom search prompts ────────────────────────────────────────────────
+
+    def _build_custom_prompts(self, parent):
+        """Expandable list of user-supplied search criteria for clip analysis."""
+        self._custom_prompt_vars: list[tk.StringVar] = []
+        self._custom_prompt_rows: list[tk.Frame] = []
+
+        # Outer card that holds everything
+        card = self._card(parent)
+
+        tk.Label(card, text="Tell the AI what to look for (optional):",
+                 font=("Segoe UI", 9), bg=CARD, fg=DIM,
+                 anchor="w").pack(fill="x")
+
+        # Scrollable container for prompt rows
+        self._prompts_container = tk.Frame(card, bg=CARD)
+        self._prompts_container.pack(fill="x", pady=(4, 0))
+
+        # Add button row
+        btn_row = tk.Frame(card, bg=CARD)
+        btn_row.pack(fill="x", pady=(6, 0))
+        self._btn(btn_row, "+  Add prompt", ACCENT, "white",
+                  self._add_custom_prompt,
+                  font=("Segoe UI", 9)).pack(side="left")
+
+        # Start with one empty row
+        self._add_custom_prompt()
+
+    def _add_custom_prompt(self):
+        """Add a new prompt entry row."""
+        var = tk.StringVar()
+        self._custom_prompt_vars.append(var)
+
+        row = tk.Frame(self._prompts_container, bg=CARD)
+        row.pack(fill="x", pady=(4, 0))
+
+        entry = ctk.CTkEntry(row, textvariable=var,
+                             placeholder_text="e.g. moments where they talk about AI",
+                             font=("Segoe UI", 9),
+                             fg_color=ENTRY_BG, text_color=TEXT,
+                             corner_radius=6, border_color=BORDER)
+        entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        remove_btn = ctk.CTkButton(
+            row, text="x", width=28, height=28,
+            font=("Segoe UI", 10, "bold"),
+            fg_color=BORDER, text_color=DIM,
+            hover_color="#ef4444", corner_radius=6,
+            command=lambda r=row, v=var: self._remove_custom_prompt(r, v))
+        remove_btn.pack(side="right")
+
+        self._custom_prompt_rows.append(row)
+
+    def _remove_custom_prompt(self, row: tk.Frame, var: tk.StringVar):
+        """Remove a prompt entry row."""
+        if var in self._custom_prompt_vars:
+            self._custom_prompt_vars.remove(var)
+        if row in self._custom_prompt_rows:
+            self._custom_prompt_rows.remove(row)
+        row.destroy()
+
+    def _get_custom_prompts(self) -> list[str]:
+        """Return non-empty custom prompt strings."""
+        return [v.get().strip() for v in self._custom_prompt_vars
+                if v.get().strip()]
+
     # ── File paths grid ───────────────────────────────────────────────────────
 
     def _build_paths(self, parent):
@@ -2919,9 +2996,9 @@ Notes
 
         if mode in ("full", "analyze"):
             from providers import PROVIDERS
-            provider = self._prof_provider.get().strip() or "anthropic"
+            provider = self._prof_provider.get().strip() or "claude_code"
             if provider != "ollama":
-                prov_info = PROVIDERS.get(provider, PROVIDERS["anthropic"])
+                prov_info = PROVIDERS.get(provider, PROVIDERS["claude_code"])
                 api_key = self._prof_api_key.get().strip() or \
                           os.environ.get(prov_info["env_key"], "")
                 if not api_key:
@@ -3094,12 +3171,17 @@ Notes
     def _make_client(self):
         """Create an LLMClient from the active profile (or env vars)."""
         from providers import PROVIDERS, make_client
-        provider = self._prof_provider.get().strip() or "anthropic"
-        prov_info = PROVIDERS.get(provider, PROVIDERS["anthropic"])
+        provider = self._prof_provider.get().strip() or "claude_code"
+        prov_info = PROVIDERS.get(provider, PROVIDERS["claude_code"])
         if provider == "ollama":
             api_key = "ollama"
             base_url = self._prof_base_url.get().strip() or \
                        prov_info.get("base_url", "http://localhost:11434")
+        elif provider == "claude_code":
+            # API key is optional (used as Anthropic fallback if rate-limited)
+            api_key = self._prof_api_key.get().strip() or \
+                      os.environ.get("ANTHROPIC_API_KEY", "")
+            base_url = ""
         else:
             api_key = self._prof_api_key.get().strip() or \
                       os.environ.get(prov_info["env_key"], "")
@@ -3116,67 +3198,132 @@ Notes
 
     def _do_analysis(self, chunks: list, client) -> list | None:
         """Call the LLM on each chunk; return deduplicated ClipSuggestion list."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         from providers import PROVIDERS
-        provider = self._prof_provider.get().strip() or "anthropic"
-        prov_info = PROVIDERS.get(provider, PROVIDERS["anthropic"])
+        provider = self._prof_provider.get().strip() or "claude_code"
+        prov_info = PROVIDERS.get(provider, PROVIDERS["claude_code"])
         model = self._prof_model.get().strip() or prov_info["default_model"]
+        custom_prompts = self._get_custom_prompts()
 
         total = len(chunks)
         padding_sec = self.padding_minutes.get() * 60
         total_duration = max((c["window_end"] for c in chunks), default=0)
+        max_workers = 4 if provider == "claude_code" else 1
         self._q.put(("log", f"Analysing {total} windows with "
-                             f"{prov_info['label']} ({model})…\n"))
+                             f"{prov_info['label']} ({model})"
+                             f"{f' [{max_workers}x parallel]' if max_workers > 1 else ''}…\n"))
         self._q.put(("analysis_start", total))
+        if custom_prompts:
+            self._q.put(("log", f"  Custom search prompts ({len(custom_prompts)}):\n"))
+            for cp in custom_prompts:
+                self._q.put(("log", f"    - {cp}\n"))
         if padding_sec > 0:
             self._q.put(("log", f"  Padding: ±{self.padding_minutes.get():.1f} min "
                                  f"around each core clip\n"))
 
         from clip_finder import ClipSuggestion
 
-        candidates = []
-        for i, chunk in enumerate(chunks):
+        # Reset per-run error tracking in clip_finder
+        cf._consecutive_errors = 0
+        cf._last_error_msg = ""
+
+        _fallback_logged = False
+
+        def _analyze_one(i, chunk):
+            nonlocal _fallback_logged
             if self._cancel.is_set():
-                self._q.put(("warn", "Cancelled by user.\n"))
-                self._q.put(("analysis_done", None))
-                return None
+                return i, chunk, None
+            result = cf.analyze_chunk(chunk, client, model=model,
+                                      custom_prompts=custom_prompts)
+            # Log fallback transition the first time it happens
+            if getattr(client, "fallback_activated", False) and not _fallback_logged:
+                _fallback_logged = True
+                self._q.put(("warn",
+                    "Claude Code rate limit reached — switching to "
+                    "Anthropic API fallback for remaining windows.\n"))
+            return i, chunk, result
 
-            self._q.put(("log", f"  Window {i+1}/{total} "
-                         f"({cf.fmt_time(chunk['window_start'])} → "
-                         f"{cf.fmt_time(chunk['window_end'])})\n"))
+        candidates = []
+        done_count = 0
+        fail_count = 0
 
-            result = cf.analyze_chunk(chunk, client, model=model)
-            self._q.put(("analysis_progress", (i + 1, total)))
-            if not result or not result.get("has_clip"):
-                continue
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_map = {
+                pool.submit(_analyze_one, i, chunk): (i, chunk)
+                for i, chunk in enumerate(chunks)
+            }
 
-            # Core clip as identified by Claude
-            core_start = chunk["window_start"] + result.get("clip_start_offset", 0)
-            core_end   = chunk["window_start"] + result.get("clip_end_offset", 60)
-            core_start = max(core_start, chunk["window_start"])
-            core_end   = min(core_end,   chunk["window_end"])
+            for future in as_completed(future_map):
+                if self._cancel.is_set():
+                    for f in future_map:
+                        f.cancel()
+                    self._q.put(("warn", "Cancelled by user.\n"))
+                    self._q.put(("analysis_done", None))
+                    return None
 
-            if core_end - core_start < 30:
-                continue
+                try:
+                    i, chunk, result = future.result()
+                except Exception as exc:
+                    done_count += 1
+                    fail_count += 1
+                    self._q.put(("warn", f"  Analysis error: {exc}\n"))
+                    self._q.put(("analysis_progress", (done_count, total)))
+                    continue
 
-            # Expand with padding
-            clip_start = max(0.0, core_start - padding_sec)
-            clip_end   = core_end + padding_sec
-            if total_duration > 0:
-                clip_end = min(clip_end, total_duration)
-            duration = clip_end - clip_start
+                done_count += 1
+                # A None result means analyze_chunk caught an error internally
+                if result is None:
+                    fail_count += 1
+                self._q.put(("log", f"  Window {i+1}/{total} "
+                             f"({cf.fmt_time(chunk['window_start'])} → "
+                             f"{cf.fmt_time(chunk['window_end'])})\n"))
+                self._q.put(("analysis_progress", (done_count, total)))
 
-            candidates.append({
-                "chunk": chunk, "result": result,
-                "clip_start": clip_start, "clip_end": clip_end,
-                "duration": duration, "score": result.get("virality_score", 0)
-            })
+                if not result or not result.get("has_clip"):
+                    continue
+
+                # Core clip as identified by Claude
+                core_start = chunk["window_start"] + result.get("clip_start_offset", 0)
+                core_end   = chunk["window_start"] + result.get("clip_end_offset", 60)
+                core_start = max(core_start, chunk["window_start"])
+                core_end   = min(core_end,   chunk["window_end"])
+
+                if core_end - core_start < 30:
+                    continue
+
+                # Expand with padding
+                clip_start = max(0.0, core_start - padding_sec)
+                clip_end   = core_end + padding_sec
+                if total_duration > 0:
+                    clip_end = min(clip_end, total_duration)
+                duration = clip_end - clip_start
+
+                candidates.append({
+                    "chunk": chunk, "result": result,
+                    "clip_start": clip_start, "clip_end": clip_end,
+                    "duration": duration, "score": result.get("virality_score", 0)
+                })
+
+        # Log any CLI stderr warnings collected during analysis
+        cc_warnings = getattr(client, "_cc_stderr_warnings", [])
+        if cc_warnings:
+            unique = sorted(set(cc_warnings))
+            for w in unique:
+                self._q.put(("warn", f"  Claude Code CLI warning: {w}\n"))
+
+        # Summarise fallback if it was activated
+        if getattr(client, "fallback_activated", False):
+            self._q.put(("log",
+                "  Note: some windows were analysed via Anthropic API "
+                "fallback due to CLI rate limit.\n"))
 
         self._q.put(("analysis_done", None))
 
-        # Log token usage for the analysis phase
+        # Log token usage for the analysis phase (API calls only; CLI calls
+        # do not report token counts)
         if client.total_tokens > 0:
             self._q.put(("log",
-                f"  Token usage — input: {client.input_tokens:,}  "
+                f"  Token usage (API calls) — input: {client.input_tokens:,}  "
                 f"output: {client.output_tokens:,}  "
                 f"total: {client.total_tokens:,}\n"))
 
@@ -3208,7 +3355,30 @@ Notes
                 break
 
         if not selected:
-            self._q.put(("warn", "No compelling clip suggestions found.\n"))
+            # Pull the last error from clip_finder for context
+            last_err = getattr(cf, "_last_error_msg", "")
+            if fail_count == total:
+                msg = (
+                    f"All {total} analysis windows failed. "
+                    f"This usually means your API key is invalid, your "
+                    f"account has insufficient credits, or the provider "
+                    f"is unreachable.\n")
+                if last_err:
+                    msg += f"  Last error: {last_err}\n"
+                msg += (
+                    f"  Check your API key and account balance in your "
+                    f"provider's dashboard.\n")
+                self._q.put(("err", msg))
+            elif fail_count > 0:
+                msg = (
+                    f"{fail_count} of {total} windows failed during "
+                    f"analysis. No clips found in the remaining windows.\n")
+                if last_err:
+                    msg += f"  Last error: {last_err}\n"
+                self._q.put(("warn", msg))
+            else:
+                self._q.put(("warn",
+                    "No compelling clip suggestions found.\n"))
 
         return selected
 

@@ -13,7 +13,10 @@ Find long-form editing sections inside MP4 streams using Whisper + Claude, then 
   - **Windows:** download from ffmpeg.org and add the `bin` folder to your PATH, or install via `winget install ffmpeg`
   - **macOS:** `brew install ffmpeg`
   - **Linux:** `sudo apt install ffmpeg`
-- An [Anthropic API key](https://console.anthropic.com/)
+- An LLM provider — one of:
+  - An [Anthropic API key](https://console.anthropic.com/)
+  - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) with an active Pro/Max subscription (no API key needed)
+  - An API key for OpenAI, Google Gemini, xAI Grok, or a local Ollama installation
 
 ### Install
 
@@ -41,7 +44,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Open `.env` and add your key:
+Open `.env` and add your key (not needed if using Claude Code Subscription):
 ```
 ANTHROPIC_API_KEY=sk-ant-...
 ```
@@ -177,6 +180,44 @@ python clip_finder.py stream.mp4 --transcript transcript.json
 
 ---
 
+## LLM providers
+
+Stream Clipper supports multiple LLM providers for the analysis step. Configure them in the GUI's **Settings** tab or via environment variables.
+
+| Provider | API Key? | Notes |
+|---|---|---|
+| Anthropic (Claude) | Yes | Standard API billing per token |
+| OpenAI (ChatGPT) | Yes | Standard API billing per token |
+| Google (Gemini) | Yes | Standard API billing per token |
+| xAI (Grok) | Yes | Standard API billing per token |
+| Ollama (Local) | No | Free, runs models locally |
+| **Claude Code (Subscription)** | **No** | **Uses your Claude Pro/Max subscription via the Claude Code CLI** |
+
+### Claude Code (Subscription) provider
+
+This provider lets you use your existing Claude Pro or Max subscription for the analysis step instead of paying per-token API costs. It works by calling the `claude` CLI tool in the background.
+
+**Requirements:**
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and on your PATH
+- An active Claude Pro or Max subscription, authenticated via `claude auth`
+
+**Setup (GUI):**
+1. Go to the **Settings** tab and select **Claude Code (Subscription)** as the provider.
+2. Choose a model (default: `claude-sonnet-4-6`).
+3. Optionally enter an Anthropic API key as a **fallback** — if the CLI hits your subscription's rate limit mid-analysis, the remaining windows will automatically switch to the standard Anthropic API.
+4. Save the profile.
+
+**Setup (CLI / env):**
+No environment variable is needed — the `claude` CLI handles authentication through your subscription. To enable the API fallback, set `ANTHROPIC_API_KEY` in your `.env`.
+
+**How it works:**
+- Each transcript window is sent to `claude -p` as a subprocess.
+- Analysis runs **4 windows in parallel** for faster throughput.
+- If a rate limit is hit and a fallback API key is configured, the remaining windows seamlessly switch to the Anthropic API. A warning is logged when this happens.
+- Token usage is not tracked for CLI calls (only for API fallback calls).
+
+---
+
 ## Clip padding
 
 By default, Stream Clipper adds **3 minutes before and after** each core clip identified by Claude. This means:
@@ -236,7 +277,8 @@ MP4 file
         └─► Whisper     local transcription → timestamped segments
                         (GUI shows live progress bar)
               └─► Chunker     sliding analysis windows (configurable size + 1-min overlap)
-                    └─► Claude      score each window for clip potential
+                    └─► LLM         score each window for clip potential
+                    │               (4x parallel when using Claude Code provider)
                           └─► Padder     expand core clip by ±padding minutes
                                 └─► Ranker    sort + deduplicate by virality score
                                       └─► Output   log / JSON / ffmpeg script / GUI panel
@@ -248,8 +290,9 @@ MP4 file
 
 | File | Purpose |
 |------|---------|
-| `clip_finder.py` | Core pipeline: audio extraction, Whisper, Claude analysis, output |
+| `clip_finder.py` | Core pipeline: audio extraction, Whisper, LLM analysis, output |
 | `gui.py` | Desktop GUI front-end for `clip_finder.py` |
+| `providers.py` | Multi-provider LLM abstraction (Anthropic, OpenAI, Gemini, Grok, Ollama, Claude Code) |
 | `StreamClipper.jsx` | Standalone React component (browser-based, paste-transcript workflow) |
 
 ---

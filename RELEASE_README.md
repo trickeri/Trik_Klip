@@ -34,7 +34,10 @@ No cloud transcription. No subscriptions. One executable.
 ## Requirements
 
 - **Windows 10 or Windows 11**
-- **An API key for at least one LLM provider**, or a local Ollama installation (see [LLM Provider Setup](#llm-provider-setup))
+- **An LLM provider** -- at least one of the following:
+  - An API key for a cloud provider (Claude, ChatGPT, Gemini, or Grok)
+  - A local Ollama installation
+  - **Claude Code CLI** with a Claude Pro or Max subscription (no API key needed)
 - A GPU is not required but will significantly speed up transcription with larger Whisper models
 
 ffmpeg is bundled with the release. You do not need to install it separately.
@@ -56,7 +59,7 @@ No installer is needed. To uninstall, simply delete the folder.
 ## Quick Start
 
 1. Launch **Trik_Klip.exe**.
-2. In the **Settings** tab, add an API key for your preferred LLM provider (Claude, ChatGPT, Gemini, or Grok) or configure Ollama.
+2. In the **Settings** tab, configure an LLM provider: add an API key for a cloud provider (Claude, ChatGPT, Gemini, or Grok), configure Ollama, or select **Claude Code (Subscription)** to use your Pro/Max subscription.
 3. In the **Analysis** tab, drag and drop an MP4 file onto the window or use the file picker to select one.
 4. Choose a Whisper model (start with **small** if unsure).
 5. Click **Run**. The app will extract audio, transcribe it, analyze the transcript with AI, and present ranked clip suggestions.
@@ -138,6 +141,7 @@ Supported providers:
 | Google (Gemini) | Yes | Get a key at [aistudio.google.com](https://aistudio.google.com/) |
 | xAI (Grok) | Yes | Get a key at [console.x.ai](https://console.x.ai/) |
 | Ollama (Local) | No | Requires Ollama installed on your machine |
+| Claude Code (Subscription) | No | Uses your Claude Pro/Max subscription via the Claude Code CLI |
 
 You can save multiple profiles (for example, one for Claude and one for Gemini) and switch between them to compare results.
 
@@ -196,6 +200,24 @@ You need at least one LLM provider configured to analyze transcripts. Here is ho
 
 API usage will be billed by your provider according to their pricing. A typical 2-hour video costs a few cents to analyze.
 
+### Claude Code (Subscription -- No API Key, Uses Your Pro/Max Plan)
+
+If you have a Claude Pro or Max subscription, you can use it directly for analysis without paying separate API costs. This works through the Claude Code CLI tool.
+
+1. Install Claude Code CLI by following the instructions at [docs.anthropic.com/en/docs/claude-code](https://docs.anthropic.com/en/docs/claude-code).
+2. Open a terminal and authenticate:
+   ```
+   claude auth
+   ```
+3. In Trik_Klip, go to **Settings**, select **Claude Code (Subscription)** as the provider, and save.
+4. Optionally enter an Anthropic API key in the API key field. This is used as a **fallback only** -- if your subscription's rate limit is reached mid-analysis, the remaining windows will automatically switch to the standard API so the analysis can finish without interruption.
+
+**How it differs from the standard Anthropic provider:**
+- Uses your existing subscription instead of per-token API billing.
+- Runs 4 analysis windows in parallel for faster processing.
+- No API key is required for normal use. The optional key is only a safety net for rate limits.
+- Token usage is not tracked for subscription calls (only for fallback API calls).
+
 ### Ollama (Free, Local, No API Key)
 
 Ollama lets you run LLMs entirely on your own machine at no cost.
@@ -223,6 +245,8 @@ Ollama requires sufficient RAM and ideally a GPU to run larger models. Smaller m
 
 - **Start with a shorter video for testing.** If this is your first time using Trik_Klip, try a 30-60 minute video to get familiar with the workflow before processing multi-hour streams.
 
+- **Use your Claude subscription instead of API credits.** If you have a Claude Pro or Max plan, select the **Claude Code (Subscription)** provider to analyze videos at no extra cost. Add an Anthropic API key as an optional fallback in case you hit your subscription's rate limit during a long analysis.
+
 - **Check the Log tab if something seems stuck.** The log shows exactly where the pipeline is in the process. Whisper transcription of long videos can take a while, especially with larger models.
 
 ---
@@ -240,6 +264,12 @@ Verify your API key is correct in the Settings tab. Check the Log tab for error 
 
 **Extracted clips have slightly different start/end times than shown.**
 ffmpeg seeks to the nearest keyframe when extracting without re-encoding. This can shift timestamps by a few seconds. The padding helps account for this.
+
+**Claude Code provider says "claude not found."**
+Make sure the Claude Code CLI is installed and accessible from your system PATH. Open a terminal and run `claude --version` to verify. If it works in the terminal but not in Trik_Klip, restart the application so it picks up PATH changes.
+
+**Claude Code provider hits rate limit mid-analysis.**
+This is normal with long videos on the Pro plan. If you added an Anthropic API key as a fallback, the remaining windows will switch to the API automatically. Check the Log tab for a warning message confirming the switch. To avoid this, consider using a Max subscription or analyzing shorter videos.
 
 **Windows SmartScreen blocks the application.**
 Click "More info" and then "Run anyway." This warning appears because the application is not code-signed. It is safe to run.
