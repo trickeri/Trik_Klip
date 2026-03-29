@@ -460,13 +460,38 @@ class LLMClient:
                 f"Claude Code CLI exited with code {result.returncode}: "
                 f"{detail}")
 
+        stdout = result.stdout.strip()
+
+        # Claude Code CLI may exit 0 but output a rate-limit error as
+        # plain text in stdout (not valid JSON).  Detect this before
+        # returning it as an "LLM response".
+        stdout_lower = stdout.lower()
+        _rate_phrases = (
+            "rate limit", "usage limit", "token limit",
+            "too many requests", "quota", "capacity", "exceeded",
+            "try again later", "billing",
+        )
+        if not stdout.startswith("{") and any(
+            p in stdout_lower for p in _rate_phrases
+        ):
+            self._cc_exhausted = True
+            if self.api_key:
+                self.fallback_activated = True
+                return self._call_anthropic_fallback(
+                    model, user, system, max_tokens)
+            raise ClaudeCodeRateLimitError(
+                f"Claude Code rate limit reached (exit 0 but non-JSON "
+                f"response).\n  stdout: {stdout[:300]}\n"
+                f"  Add an Anthropic API key in Settings to enable "
+                f"automatic fallback.")
+
         # Capture stderr warnings even on success (CLI may emit non-fatal
         # warnings about auth, updates, etc.)
         stderr = result.stderr.strip()
         if stderr:
             self._cc_stderr_warnings.append(stderr)
 
-        return result.stdout.strip()
+        return stdout
 
     # -- Anthropic API fallback (used when Claude Code CLI is rate-limited) ---
 

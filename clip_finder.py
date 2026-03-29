@@ -406,11 +406,18 @@ def analyze_chunk(
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        # Show a preview of what came back so the user can diagnose the issue
+        # Track JSON parse failures the same way as API errors so that
+        # the GUI can distinguish "all windows failed" from "no clips"
+        _consecutive_errors += 1
         preview = raw[:200] + ("…" if len(raw) > 200 else "")
-        console.log(f"[yellow]Warning: Could not parse LLM response for chunk "
-                     f"at {fmt_time(chunk['window_start'])}. "
-                     f"Response preview: {preview!r}[/yellow]")
+        if _consecutive_errors <= 3:
+            console.log(f"[yellow]Warning: Could not parse LLM response for "
+                         f"chunk at {fmt_time(chunk['window_start'])}. "
+                         f"Response preview: {preview!r}[/yellow]")
+        elif _consecutive_errors == 4:
+            console.log(f"[yellow]Suppressing further parse errors "
+                         f"(same issue repeating)…[/yellow]")
+        _last_error_msg = f"Unparseable response: {preview!r}"
         return None
 
 
