@@ -83,7 +83,7 @@ class GuiConsole:
         self._q.put(("log", _RICH_TAG.sub("", str(msg))))
 
 
-VERSION = "1.0.01_e"
+VERSION = "1.0.02_a"
 
 # ── Colour palette ────────────────────────────────────────────────────────────
 
@@ -3129,13 +3129,18 @@ Notes
 
     def _run_full(self):
         self._q.put(("head", "=== Full Pipeline ===\n"))
-        segments = self._do_transcription()
+        result = self._do_transcription()
+        segments, spikes = result if result[0] is not None else (None, [])
         if segments is None or self._cancel.is_set():
             return
 
         save_t = self.save_transcript.get().strip()
         if save_t:
             cf.save_transcript(segments, save_t)
+            # Save spikes sidecar next to transcript
+            spikes_path = save_t.rsplit(".", 1)[0] + "_spikes.json"
+            if spikes:
+                cf.save_spikes(spikes, spikes_path)
 
         if not segments:
             self._q.put(("err", "No transcript segments found.\n"))
@@ -3149,6 +3154,7 @@ Notes
             return
 
         chunks = cf.chunk_transcript(segments, window_minutes=self.window_minutes.get())
+        cf.annotate_chunks_with_spikes(chunks, spikes)
         clips = self._do_analysis(chunks, client)
         if clips is None:
             return
@@ -3158,7 +3164,7 @@ Notes
 
     def _run_transcribe(self):
         self._q.put(("head", "=== Extract + Transcribe Only ===\n"))
-        segments = self._do_transcription()
+        segments, spikes = self._do_transcription()
         if segments is None:
             return
 
@@ -3166,6 +3172,10 @@ Notes
         if save_t:
             cf.save_transcript(segments, save_t)
             self._q.put(("ok", f"Transcript saved → {save_t}\n"))
+            if spikes:
+                spikes_path = save_t.rsplit(".", 1)[0] + "_spikes.json"
+                cf.save_spikes(spikes, spikes_path)
+                self._q.put(("log", f"Volume spikes saved → {spikes_path}\n"))
         else:
             self._q.put(("warn",
                 "No 'Save Transcript JSON' path set — transcript will not be kept.\n"))
@@ -3183,11 +3193,18 @@ Notes
             return
         self._q.put(("log", f"Loaded {len(segments)} segments.\n"))
 
+        # Try to load volume spikes sidecar
+        spikes_path = t_path.rsplit(".", 1)[0] + "_spikes.json" if t_path else ""
+        spikes = cf.load_spikes(spikes_path) if spikes_path else []
+        if spikes:
+            self._q.put(("log", f"Loaded {len(spikes)} volume spike(s) from sidecar.\n"))
+
         client = self._make_client()
         if client is None:
             return
 
         chunks = cf.chunk_transcript(segments, window_minutes=self.window_minutes.get())
+        cf.annotate_chunks_with_spikes(chunks, spikes)
         clips = self._do_analysis(chunks, client)
         if clips is None:
             return
@@ -3221,16 +3238,26 @@ Notes
             except SystemExit:
                 self._q.put(("audio_done", None))
                 self._q.put(("whisper_done", None))
-                return None
+                return None, []
             self._q.put(("audio_done", None))
             if self._cancel.is_set():
                 self._q.put(("warn", "Cancelled.\n"))
                 self._q.put(("whisper_done", None))
-                return None
+                return None, []
+            # Detect volume spikes before transcription
+            self._q.put(("log", "Scanning audio for volume spikes…\n"))
+            spikes = cf.detect_volume_spikes(wav_path)
+            if spikes:
+                self._q.put(("log", f"  Found {len(spikes)} volume spike(s)\n"))
+            # Save spikes alongside transcript
+            spikes_path = save_wav.rsplit(".", 1)[0] + "_spikes.json" if save_wav else ""
+            if spikes_path:
+                cf.save_spikes(spikes, spikes_path)
             self._q.put(("whisper_start", None))
-            return cf.transcribe_audio(wav_path, model_size=self.whisper_model.get(),
-                                       language=self._whisper_lang_code(),
-                                       progress_cb=_progress)
+            segments = cf.transcribe_audio(wav_path, model_size=self.whisper_model.get(),
+                                           language=self._whisper_lang_code(),
+                                           progress_cb=_progress)
+            return segments, spikes
         else:
             tmpdir = tempfile.mkdtemp()
             wav_path = os.path.join(tmpdir, "audio.wav")
@@ -3240,7 +3267,7 @@ Notes
             except SystemExit:
                 self._q.put(("audio_done", None))
                 self._q.put(("whisper_done", None))
-                return None
+                return None, []
             self._q.put(("audio_done", None))
             if self._cancel.is_set():
                 self._q.put(("warn", "Cancelled.\n"))
@@ -3250,7 +3277,12 @@ Notes
                     os.rmdir(tmpdir)
                 except OSError:
                     pass
-                return None
+                return None, []
+            # Detect volume spikes before transcription (WAV still exists)
+            self._q.put(("log", "Scanning audio for volume spikes…\n"))
+            spikes = cf.detect_volume_spikes(wav_path)
+            if spikes:
+                self._q.put(("log", f"  Found {len(spikes)} volume spike(s)\n"))
             self._q.put(("whisper_start", None))
             segments = cf.transcribe_audio(wav_path, model_size=self.whisper_model.get(),
                                            language=self._whisper_lang_code(),
@@ -3260,7 +3292,7 @@ Notes
                 os.rmdir(tmpdir)
             except OSError:
                 pass
-            return segments
+            return segments, spikes
 
     def _make_client(self):
         """Create an LLMClient from the active profile (or env vars)."""

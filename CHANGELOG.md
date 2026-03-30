@@ -9,6 +9,16 @@
 
 ---
 
+## v1.0.02_a
+
+- Added audio volume spike detection to the pipeline. Uses numpy RMS energy analysis with adaptive rolling baseline to detect moments of excitement (yelling, reactions). Spikes are annotated into transcript chunks before LLM analysis as `[AUDIO ENERGY NOTES]`, giving the AI strong signals for clip-worthiness.
+- Added full CLI interface for AI agent automation. Every pipeline step is now independently runnable via subcommands: `extract-audio`, `detect-spikes`, `transcribe`, `chunk`, `analyze`, `extract`, `generate-slices`, `run`, `providers`, `commands`. All commands output JSON by default for easy chaining.
+- Added `commands` subcommand that outputs a machine-readable directory of all CLI commands, options, inputs, and outputs — designed for AI agents to discover and use the pipeline.
+- Added `claude_code` as a selectable provider in the CLI (previously only available in GUI).
+- Refactored clip extraction and slice generation logic from GUI into reusable functions in `clip_finder.py`.
+- Added `list_providers()` function to `providers.py`.
+- Console output from pipeline functions now goes to stderr to avoid contaminating JSON output on stdout.
+
 ## v1.0.01_e
 
 - Fixed Claude Code (Subscription) provider billing API credits instead of using subscription tokens. The CLI was picking up the `ANTHROPIC_API_KEY` environment variable and using it over OAuth auth. Now strips that env var from the subprocess so `claude -p` uses subscription tokens as intended.

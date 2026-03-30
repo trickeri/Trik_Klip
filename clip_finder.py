@@ -47,7 +47,7 @@ from rich.table import Table
 from rich.panel import Panel
 from rich import print as rprint
 
-console = Console()
+console = Console(stderr=True)
 
 
 # ── Data models ──────────────────────────────────────────────────────────────
@@ -163,6 +163,183 @@ def extract_audio(mp4_path: str, output_wav: str,
             console.print(f"[red]ffmpeg error:[/red]\n{result.stderr}")
             sys.exit(1)
     console.log("[green]✓ Audio extracted[/green]")
+
+
+# ── Step 1b: Detect volume spikes ────────────────────────────────────────────
+
+def detect_volume_spikes(
+    wav_path: str,
+    frame_ms: int = 25,
+    hop_ms: int = 10,
+    baseline_seconds: float = 15.0,
+    spike_threshold: float = 2.0,
+    min_spike_seconds: float = 0.3,
+    merge_gap_seconds: float = 2.0,
+) -> list[tuple[float, float, float]]:
+    """Detect sudden volume spikes in a WAV file.
+
+    Returns a list of (start_seconds, end_seconds, peak_intensity) tuples
+    where peak_intensity is the multiplier above the rolling average.
+    """
+    import wave
+    import numpy as np
+
+    with wave.open(wav_path, "r") as wf:
+        sample_rate = wf.getframerate()
+        n_frames = wf.getnframes()
+        raw = wf.readframes(n_frames)
+
+    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+
+    if len(samples) == 0:
+        return []
+
+    frame_samples = int(sample_rate * frame_ms / 1000)
+    hop_samples = int(sample_rate * hop_ms / 1000)
+
+    if len(samples) < frame_samples:
+        return []
+
+    # Compute RMS per frame using sliding window
+    frames = np.lib.stride_tricks.sliding_window_view(
+        samples, frame_samples)[::hop_samples]
+    rms = np.sqrt(np.mean(frames ** 2, axis=1))
+
+    # Rolling average baseline
+    baseline_frames = max(1, int(baseline_seconds / (hop_ms / 1000)))
+    # For very short audio, just use the full-length mean
+    if baseline_frames >= len(rms):
+        rolling_avg = np.full_like(rms, np.mean(rms))
+    else:
+        kernel = np.ones(baseline_frames) / baseline_frames
+        rolling_avg = np.convolve(rms, kernel, mode="same")
+
+    # Avoid division by zero in silent regions
+    rolling_avg = np.maximum(rolling_avg, np.finfo(np.float32).eps)
+
+    ratio = rms / rolling_avg
+
+    # Find contiguous regions above threshold
+    above = ratio > spike_threshold
+    spikes_raw: list[tuple[int, int, float]] = []
+    i = 0
+    while i < len(above):
+        if above[i]:
+            start = i
+            while i < len(above) and above[i]:
+                i += 1
+            end = i
+            duration_sec = (end - start) * hop_ms / 1000
+            if duration_sec >= min_spike_seconds:
+                peak = float(np.max(ratio[start:end]))
+                spikes_raw.append((start, end, peak))
+        else:
+            i += 1
+
+    if not spikes_raw:
+        return []
+
+    # Merge spikes within merge_gap_seconds
+    merge_gap_frames = int(merge_gap_seconds / (hop_ms / 1000))
+    merged: list[tuple[int, int, float]] = [spikes_raw[0]]
+    for start, end, peak in spikes_raw[1:]:
+        prev_start, prev_end, prev_peak = merged[-1]
+        if start - prev_end <= merge_gap_frames:
+            merged[-1] = (prev_start, end, max(prev_peak, peak))
+        else:
+            merged.append((start, end, peak))
+
+    # Convert frame indices to seconds
+    result = []
+    for start, end, peak in merged:
+        start_sec = start * hop_ms / 1000
+        end_sec = end * hop_ms / 1000
+        result.append((start_sec, end_sec, round(peak, 1)))
+
+    console.log(f"[green]✓ Detected {len(result)} volume spike(s)[/green]")
+    return result
+
+
+def annotate_chunks_with_spikes(
+    chunks: list[dict],
+    spikes: list[tuple[float, float, float]],
+) -> list[dict]:
+    """Append volume spike annotations to chunk text before LLM analysis."""
+    if not spikes:
+        return chunks
+
+    for chunk in chunks:
+        w_start = chunk["window_start"]
+        w_end = chunk["window_end"]
+        # Find spikes overlapping this window
+        hits = [
+            (s, e, intensity) for s, e, intensity in spikes
+            if s < w_end and e > w_start
+        ]
+        if hits:
+            lines = ["\n\n[AUDIO ENERGY NOTES]"]
+            for s, e, intensity in hits:
+                dur = e - s
+                lines.append(
+                    f"- Volume spike at {fmt_time(s)} "
+                    f"({intensity}x above average, {dur:.1f}s duration)"
+                )
+            chunk["text"] += "\n".join(lines)
+
+    return chunks
+
+
+def save_spikes(spikes: list[tuple[float, float, float]], path: str) -> None:
+    """Save volume spikes to a JSON file."""
+    data = [{"start": s, "end": e, "intensity": i} for s, e, i in spikes]
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def load_spikes(path: str) -> list[tuple[float, float, float]]:
+    """Load volume spikes from a JSON file."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return [(d["start"], d["end"], d["intensity"]) for d in data]
+    except Exception:
+        return []
+
+
+def save_chunks(chunks: list[dict], path: str, total_duration: float = 0) -> None:
+    """Save analysis chunks to a JSON file with metadata."""
+    data = {
+        "total_duration": total_duration,
+        "chunk_count": len(chunks),
+        "chunks": chunks,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def load_chunks(path: str) -> tuple[list[dict], float]:
+    """Load analysis chunks from a JSON file.
+
+    Returns (chunks_list, total_duration).
+    """
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return data["chunks"], data.get("total_duration", 0)
+
+
+def load_clips_json(path: str) -> list[ClipSuggestion]:
+    """Load clip suggestions from a previously saved JSON file."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    results = []
+    for d in data:
+        # Strip the formatted time fields that save_results adds
+        d.pop("segment_start_fmt", None)
+        d.pop("segment_end_fmt", None)
+        d.pop("clip_start_fmt", None)
+        d.pop("clip_end_fmt", None)
+        results.append(ClipSuggestion(**d))
+    return results
 
 
 # ── Step 2: Transcribe with Whisper ──────────────────────────────────────────
@@ -342,7 +519,8 @@ RULES:
 - "clip_end_offset": integer, seconds from the START of this window
 - clip_end_offset minus clip_start_offset must be between 60 and 180
 - If no good clip exists, return EXACTLY: {"has_clip": false}
-- Do NOT wrap in markdown fences. Do NOT add extra fields. Do NOT use a different schema."""
+- Do NOT wrap in markdown fences. Do NOT add extra fields. Do NOT use a different schema.
+- If the transcript contains [AUDIO ENERGY NOTES], these indicate moments where the speaker's volume spiked significantly (yelling, excitement, reactions). Treat these as strong positive signals for clip-worthiness — try to include these moments in your clip selection."""
 
 
 _consecutive_errors = 0
@@ -823,125 +1001,738 @@ def snap_cut_end(
     return result
 
 
+# ── Per-clip extraction (refactored from gui.py) ──────────────────────────────
+
+def extract_clip_with_assets(
+    clip: ClipSuggestion,
+    mp4_path: str,
+    output_dir: str,
+    segments: list[TranscriptSegment] | None = None,
+) -> dict:
+    """Extract a single clip MP4 and its sidecar assets (transcript, editing prompt).
+
+    Returns a dict with paths to the created files.
+    """
+    safe = "".join(c if c.isalnum() or c in "-_ " else ""
+                   for c in clip.title).replace(" ", "_")[:50]
+    clip_name = f"clip_{clip.rank:02d}_{safe}"
+    clip_dir = Path(output_dir) / clip_name
+    clip_dir.mkdir(parents=True, exist_ok=True)
+
+    out_file = clip_dir / f"{clip_name}.mp4"
+    duration = clip.clip_end - clip.clip_start
+
+    # Extract video segment
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", f"{clip.clip_start:.2f}",
+        "-i", mp4_path,
+        "-t", f"{duration:.2f}",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k",
+        str(out_file)
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace",
+                            creationflags=_SUBPROCESS_FLAGS)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg error: {result.stderr[-400:]}")
+
+    info = {
+        "clip_name": clip_name,
+        "clip_dir": str(clip_dir),
+        "mp4": str(out_file),
+        "rank": clip.rank,
+        "title": clip.title,
+        "clip_start": clip.clip_start,
+        "clip_end": clip.clip_end,
+        "duration": duration,
+    }
+
+    # Clip transcript
+    if segments:
+        transcript_out = clip_dir / f"{clip_name}_transcript.json"
+        try:
+            clip_segs = save_clip_transcript(
+                segments, clip.clip_start, clip.clip_end,
+                str(transcript_out)
+            )
+            info["transcript"] = str(transcript_out)
+            info["segment_count"] = len(clip_segs)
+        except Exception:
+            clip_segs = []
+    else:
+        clip_segs = []
+
+    # Editing prompt
+    prompt_out = clip_dir / f"{clip_name}_editing_prompt.txt"
+    try:
+        save_editing_prompt(clip, clip_segs, str(prompt_out))
+        info["editing_prompt"] = str(prompt_out)
+    except Exception:
+        pass
+
+    return info
+
+
+def generate_slices(
+    clip_dir: str,
+    client,
+    model: str,
+    editing_notes: str = "",
+    premiere: bool = False,
+) -> dict:
+    """Generate editing slices for a clip directory using LLM analysis.
+
+    Refactored from gui.py._generate_slices_worker for CLI use.
+    Returns a dict with slice info.
+    """
+    clip_dir_p = Path(clip_dir)
+
+    # Locate files
+    mp4s = [f for f in sorted(clip_dir_p.glob("*.mp4"))
+            if not f.stem.startswith("slice_")]
+    prompts = sorted(clip_dir_p.glob("*_editing_prompt.txt"))
+    transcripts = sorted(clip_dir_p.glob("*_transcript.json"))
+
+    if not mp4s:
+        raise FileNotFoundError("No clip .mp4 found in folder.")
+    if not prompts:
+        raise FileNotFoundError("No _editing_prompt.txt found. Run extraction first.")
+
+    clip_mp4 = mp4s[0]
+    prompt_path = prompts[0]
+
+    with open(prompt_path, encoding="utf-8") as f:
+        prompt_text = f.read()
+
+    if editing_notes:
+        prompt_text += (
+            "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "ADDITIONAL EDITING NOTES FROM THE USER\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "Follow these instructions alongside the standard rules above:\n\n"
+            f"{editing_notes}\n"
+        )
+
+    # Parse clip_start / clip_end from prompt metadata
+    clip_start = 0.0
+    clip_end = float("inf")
+    m = re.search(r"Source range:\s*(\d+:\d+:\d+)\s*[→\-]+\s*(\d+:\d+:\d+)", prompt_text)
+    if m:
+        clip_start = parse_time(m.group(1))
+        clip_end = parse_time(m.group(2))
+
+    # Load transcript segments for sentence-boundary snapping
+    segments: list[TranscriptSegment] = []
+    if transcripts:
+        try:
+            segments = load_transcript_from_json(str(transcripts[0]))
+        except Exception:
+            pass
+
+    # Send prompt to LLM
+    console.log(f"[cyan]Sending editing prompt to LLM ({model})...[/cyan]")
+    edit_plan = client.message(
+        model=model,
+        user_prompt=prompt_text,
+        max_tokens=4096,
+    )
+
+    plan_path = clip_dir_p / f"{clip_mp4.stem}_edit_plan.txt"
+    with open(plan_path, "w", encoding="utf-8") as f:
+        f.write(edit_plan)
+    console.log(f"[green]Edit plan saved: {plan_path.name}[/green]")
+
+    # Parse cut list
+    cuts = parse_cut_list(edit_plan)
+    if not cuts:
+        return {
+            "clip_dir": str(clip_dir_p),
+            "edit_plan_path": str(plan_path),
+            "slices": [],
+            "error": "Could not parse any cuts from LLM response.",
+        }
+
+    # Remove old slices
+    for old in sorted(clip_dir_p.glob("slice_*.mp4")):
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+    # Extract each slice
+    total_dur = 0.0
+    written = 0
+    slices = []
+    for idx, cut in enumerate(cuts, 1):
+        raw_end = cut["end"]
+        snapped_end = snap_cut_end(
+            raw_end, segments, padding=2.0,
+            hard_limit=clip_end if clip_end < float("inf") else None,
+        )
+
+        ss = max(0.0, cut["start"] - clip_start)
+        duration = snapped_end - cut["start"]
+        if duration <= 0:
+            continue
+
+        slice_path = clip_dir_p / f"slice_{idx:02d}.mp4"
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{ss:.3f}",
+            "-i", str(clip_mp4),
+            "-t", f"{duration:.3f}",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "192k",
+            str(slice_path),
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace",
+                             creationflags=_SUBPROCESS_FLAGS)
+        if res.returncode == 0:
+            total_dur += duration
+            written += 1
+            slices.append({
+                "index": idx,
+                "path": str(slice_path),
+                "duration": round(duration, 1),
+                "reason": cut["reason"],
+            })
+
+    result = {
+        "clip_dir": str(clip_dir_p),
+        "edit_plan_path": str(plan_path),
+        "slices": slices,
+        "total_duration": round(total_dur, 1),
+        "slice_count": written,
+    }
+
+    # Generate Premiere setup prompt if requested
+    if premiere:
+        import re as _re
+        folder_name = clip_dir_p.name
+        clip_num_m = _re.search(r"clip[_\s]*(\d+)", folder_name, _re.IGNORECASE)
+        seq_name = (f"clip_{int(clip_num_m.group(1)):02d}_Shorts"
+                    if clip_num_m else f"{folder_name}_Shorts")
+
+        premiere_prompt = (
+            f"# Premiere Pro Setup\n\n"
+            f"1. Import all files from: {str(clip_dir_p).replace(chr(92), '/')}\n"
+            f"2. Create sequence named: {seq_name}\n"
+            f"3. Place slices in order on timeline\n"
+        )
+        prompt_path_pr = clip_dir_p / "premiere_setup_prompt.md"
+        try:
+            prompt_path_pr.write_text(premiere_prompt, encoding="utf-8")
+            result["premiere_prompt_path"] = str(prompt_path_pr)
+        except Exception:
+            pass
+
+    return result
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-@click.command()
-@click.argument("mp4_file", type=click.Path(exists=True))
-@click.option("--whisper-model", default="base", type=click.Choice(["tiny", "base", "small", "medium", "large"]),
-              help="Whisper model size (larger = more accurate, slower). Default: base")
-@click.option("--top-n", default=10, help="Number of clip suggestions to return. Default: 10")
-@click.option("--window-minutes", default=5, help="Analysis window size in minutes. Default: 5")
-@click.option("--transcript", default=None, help="Path to existing transcript JSON to skip transcription")
-@click.option("--save-transcript", "save_transcript_path", default=None,
-              help="Path to save transcript JSON for future reuse")
-@click.option("--output-json", default=None, help="Path to save results JSON")
-@click.option("--export-clips-dir", default=None,
-              help="Directory to write ffmpeg clip extraction script")
-@click.option("--audio-track", default=None, type=int,
-              help="0-based index of the audio track to extract (default: first track). "
-                   "Use ffprobe or 'ffmpeg -i <file>' to list available tracks.")
-@click.option("--padding-minutes", default=3, type=float,
-              help="Minutes of context added before/after each identified clip for editing headroom. Default: 3")
-@click.option("--provider", default="anthropic",
-              type=click.Choice(["anthropic", "openai", "gemini", "grok", "ollama"]),
-              help="LLM provider. Default: anthropic")
-@click.option("--model", "llm_model", default=None,
-              help="LLM model ID (defaults to provider's best model)")
-@click.option("--base-url", default=None,
-              help="Custom API base URL (used with ollama, e.g. http://localhost:11434). "
-                   "Defaults to provider's built-in URL.")
-def main(
-    mp4_file,
-    whisper_model,
-    top_n,
-    window_minutes,
-    transcript,
-    save_transcript_path,
-    output_json,
-    export_clips_dir,
-    audio_track,
-    padding_minutes,
-    provider,
-    llm_model,
-    base_url,
-):
-    """
-    StreamClipper — Analyze a long-form MP4 and find short-form clip opportunities.
+_ALL_PROVIDERS = ["anthropic", "openai", "gemini", "grok", "ollama", "claude_code"]
 
-    Example:
-        python clip_finder.py stream.mp4 --whisper-model small --top-n 10 --export-clips-dir ./clips
-    """
+
+def _output(data: dict | list, fmt: str):
+    """Print structured output — JSON to stdout, human-readable to stderr."""
+    if fmt == "json":
+        click.echo(json.dumps(data, indent=2))
+    else:
+        for k, v in (data if isinstance(data, dict) else {"result": data}).items():
+            click.echo(f"  {k}: {v}", err=True)
+
+
+def _error_json(msg: str, exit_code: int = 1):
+    """Print a JSON error envelope to stdout and exit."""
+    click.echo(json.dumps({"error": msg, "exit_code": exit_code}))
+    sys.exit(exit_code)
+
+
+def _resolve_provider(provider: str, llm_model: str | None, api_key: str | None,
+                      base_url: str | None):
+    """Resolve provider config and return (client, model, prov_info)."""
     from providers import PROVIDERS, make_client
 
-    prov_info = PROVIDERS[provider]
+    prov_info = PROVIDERS.get(provider)
+    if not prov_info:
+        _error_json(f"Unknown provider: {provider}")
+
     model = llm_model or prov_info["default_model"]
 
     if provider == "ollama":
-        api_key = "ollama"
+        key = "ollama"
         url = base_url or prov_info.get("base_url", "http://localhost:11434")
-    else:
-        api_key = os.environ.get(prov_info["env_key"], "")
+    elif provider == "claude_code":
+        key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         url = base_url or ""
-        if not api_key:
-            console.print(f"[red]Error: {prov_info['env_key']} environment variable not set.[/red]")
-            sys.exit(1)
-
-    try:
-        client = make_client(provider, api_key, base_url=url)
-    except Exception as exc:
-        console.print(f"[red]Could not create {provider} client: {exc}[/red]")
-        sys.exit(1)
-
-    console.print(Panel.fit(
-        "[bold cyan]StreamClipper[/bold cyan]\n[dim]Long-form → Short-form clip finder[/dim]",
-        border_style="cyan"
-    ))
-
-    # ── Transcription ──────────────────────────────────────────────────────
-    if transcript:
-        console.log(f"[cyan]Loading existing transcript:[/cyan] {transcript}")
-        segments = load_transcript_from_json(transcript)
     else:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            wav_path = os.path.join(tmpdir, "audio.wav")
-            extract_audio(mp4_file, wav_path, audio_track=audio_track)
-            segments = transcribe_audio(wav_path, model_size=whisper_model)
+        key = api_key or os.environ.get(prov_info["env_key"], "")
+        url = base_url or ""
+        if not key:
+            _error_json(f"{prov_info['env_key']} not set and no --api-key provided.")
 
-    if save_transcript_path:
-        save_transcript(segments, save_transcript_path)
+    client = make_client(provider, key, base_url=url)
+    return client, model, prov_info
 
-    if not segments:
-        console.print("[red]No transcript segments found. Exiting.[/red]")
-        sys.exit(1)
 
-    total_duration = segments[-1].end
-    console.log(f"[cyan]Total stream duration:[/cyan] {fmt_time(total_duration)} ({total_duration/3600:.2f} hrs)")
+def provider_options(f):
+    """Shared click options for LLM provider/model/key/url."""
+    f = click.option("--provider", default="claude_code",
+                     type=click.Choice(_ALL_PROVIDERS),
+                     help="LLM provider. Default: claude_code")(f)
+    f = click.option("--model", "llm_model", default=None,
+                     help="LLM model ID (defaults to provider's best model)")(f)
+    f = click.option("--api-key", default=None,
+                     help="API key (defaults to env var for the provider)")(f)
+    f = click.option("--base-url", default=None,
+                     help="Custom API base URL (for ollama, etc.)")(f)
+    return f
 
-    # ── Chunk & Analyze ────────────────────────────────────────────────────
-    chunks = chunk_transcript(segments, window_minutes=window_minutes)
-    clips = find_clips(chunks, client, top_n=top_n,
-                       padding_seconds=padding_minutes * 60,
-                       total_duration=total_duration,
-                       model=model)
 
-    if not clips:
-        console.print("[yellow]No compelling clip suggestions found.[/yellow]")
-        sys.exit(0)
+# ── Command metadata registry for the `commands` subcommand ──────────────────
 
-    # ── Output ─────────────────────────────────────────────────────────────
-    print_results(clips)
+_COMMAND_META: dict[str, dict] = {}
 
-    if output_json:
-        save_results(clips, output_json)
+def _register_meta(name: str, inputs: list[dict], outputs: list[dict]):
+    _COMMAND_META[name] = {"inputs": inputs, "outputs": outputs}
 
-    if export_clips_dir:
-        script = export_ffmpeg_commands(clips, mp4_file, export_clips_dir)
-        console.print(f"\n[green]✓ Clip extraction script written to:[/green] {script}")
-        console.print("[dim]Run it with:  bash " + script + "[/dim]")
 
-    console.print()
-    console.print("[bold green]Done![/bold green]")
+# ── Click group ──────────────────────────────────────────────────────────────
+
+@click.group(invoke_without_command=True)
+@click.pass_context
+def cli(ctx):
+    """Trik_Klip — Long-form stream to short-form clip pipeline.
+
+    Run any subcommand with --help for details, or use 'commands' for
+    a machine-readable directory of all available commands.
+    """
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+
+
+# ── extract-audio ────────────────────────────────────────────────────────────
+
+@cli.command("extract-audio")
+@click.argument("mp4_file", type=click.Path(exists=True))
+@click.option("--output", "-o", default=None, help="Output WAV path (default: <input_stem>.wav)")
+@click.option("--audio-track", default=None, type=int,
+              help="0-based audio stream index (default: first track)")
+@click.option("--format", "fmt", default="json", type=click.Choice(["json", "human"]),
+              help="Output format. Default: json")
+def cmd_extract_audio(mp4_file, output, audio_track, fmt):
+    """Extract mono 16kHz WAV audio from an MP4 file."""
+    try:
+        if output is None:
+            output = str(Path(mp4_file).with_suffix(".wav"))
+        extract_audio(mp4_file, output, audio_track=audio_track)
+        _output({"wav_path": output, "source": mp4_file}, fmt)
+    except Exception as exc:
+        _error_json(str(exc))
+
+_register_meta("extract-audio",
+    inputs=[{"name": "mp4_file", "type": "path", "required": True}],
+    outputs=[{"name": "wav_path", "type": "path"}])
+
+
+# ── detect-spikes ────────────────────────────────────────────────────────────
+
+@cli.command("detect-spikes")
+@click.argument("wav_file", type=click.Path(exists=True))
+@click.option("--output", "-o", default=None, help="Output spikes JSON path")
+@click.option("--spike-threshold", default=2.0, help="Multiplier above rolling avg. Default: 2.0")
+@click.option("--baseline-seconds", default=15.0, help="Rolling average window. Default: 15.0")
+@click.option("--min-spike-seconds", default=0.3, help="Min spike duration. Default: 0.3")
+@click.option("--merge-gap-seconds", default=2.0, help="Gap for merging spikes. Default: 2.0")
+@click.option("--format", "fmt", default="json", type=click.Choice(["json", "human"]),
+              help="Output format. Default: json")
+def cmd_detect_spikes(wav_file, output, spike_threshold, baseline_seconds,
+                      min_spike_seconds, merge_gap_seconds, fmt):
+    """Detect volume spikes in extracted audio."""
+    try:
+        if output is None:
+            output = str(Path(wav_file).with_suffix("")) + "_spikes.json"
+        spikes = detect_volume_spikes(
+            wav_file,
+            spike_threshold=spike_threshold,
+            baseline_seconds=baseline_seconds,
+            min_spike_seconds=min_spike_seconds,
+            merge_gap_seconds=merge_gap_seconds,
+        )
+        save_spikes(spikes, output)
+        _output({
+            "spikes_path": output,
+            "spike_count": len(spikes),
+            "spikes": [{"start": s, "end": e, "intensity": i} for s, e, i in spikes],
+        }, fmt)
+    except Exception as exc:
+        _error_json(str(exc))
+
+_register_meta("detect-spikes",
+    inputs=[{"name": "wav_file", "type": "path", "required": True}],
+    outputs=[{"name": "spikes_path", "type": "path"}])
+
+
+# ── transcribe ───────────────────────────────────────────────────────────────
+
+@cli.command("transcribe")
+@click.argument("wav_file", type=click.Path(exists=True))
+@click.option("--output", "-o", default=None, help="Output transcript JSON path")
+@click.option("--whisper-model", default="base",
+              type=click.Choice(["tiny", "base", "small", "medium", "large"]),
+              help="Whisper model size. Default: base")
+@click.option("--language", default="en", help="Language code. Default: en")
+@click.option("--format", "fmt", default="json", type=click.Choice(["json", "human"]),
+              help="Output format. Default: json")
+def cmd_transcribe(wav_file, output, whisper_model, language, fmt):
+    """Transcribe audio using Whisper."""
+    try:
+        if output is None:
+            output = str(Path(wav_file).with_suffix("")) + "_transcript.json"
+        segments = transcribe_audio(wav_file, model_size=whisper_model, language=language)
+        save_transcript(segments, output)
+        total_dur = segments[-1].end if segments else 0
+        _output({
+            "transcript_path": output,
+            "segment_count": len(segments),
+            "duration_seconds": round(total_dur, 1),
+        }, fmt)
+    except Exception as exc:
+        _error_json(str(exc))
+
+_register_meta("transcribe",
+    inputs=[{"name": "wav_file", "type": "path", "required": True}],
+    outputs=[{"name": "transcript_path", "type": "path"}])
+
+
+# ── chunk ────────────────────────────────────────────────────────────────────
+
+@cli.command("chunk")
+@click.argument("transcript_json", type=click.Path(exists=True))
+@click.option("--output", "-o", default=None, help="Output chunks JSON path")
+@click.option("--window-minutes", default=8, help="Window size in minutes. Default: 8")
+@click.option("--overlap-minutes", default=1, help="Overlap in minutes. Default: 1")
+@click.option("--spikes", default=None, type=click.Path(exists=True),
+              help="Path to spikes JSON for annotation")
+@click.option("--format", "fmt", default="json", type=click.Choice(["json", "human"]),
+              help="Output format. Default: json")
+def cmd_chunk(transcript_json, output, window_minutes, overlap_minutes, spikes, fmt):
+    """Chunk a transcript into analysis windows and optionally annotate with volume spikes."""
+    try:
+        if output is None:
+            output = str(Path(transcript_json).with_suffix("")) + "_chunks.json"
+        segments = load_transcript_from_json(transcript_json)
+        if not segments:
+            _error_json("No transcript segments found.")
+        total_duration = segments[-1].end
+        chunks = chunk_transcript(segments, window_minutes=window_minutes,
+                                  overlap_minutes=overlap_minutes)
+        if spikes:
+            spike_data = load_spikes(spikes)
+            chunks = annotate_chunks_with_spikes(chunks, spike_data)
+        save_chunks(chunks, output, total_duration=total_duration)
+        _output({
+            "chunks_path": output,
+            "chunk_count": len(chunks),
+            "total_duration_seconds": round(total_duration, 1),
+        }, fmt)
+    except Exception as exc:
+        _error_json(str(exc))
+
+_register_meta("chunk",
+    inputs=[{"name": "transcript_json", "type": "path", "required": True}],
+    outputs=[{"name": "chunks_path", "type": "path"}])
+
+
+# ── analyze ──────────────────────────────────────────────────────────────────
+
+@cli.command("analyze")
+@click.argument("chunks_json", type=click.Path(exists=True))
+@click.option("--output", "-o", default=None, help="Output clips JSON path")
+@click.option("--top-n", default=10, help="Max clips to return. Default: 10")
+@click.option("--padding-minutes", default=3.0, type=float,
+              help="Context padding in minutes. Default: 3")
+@click.option("--max-workers", default=None, type=int,
+              help="Parallel threads (default: 1, auto 4 for claude_code)")
+@click.option("--custom-prompt", multiple=True,
+              help="Custom search criteria (repeatable)")
+@click.option("--format", "fmt", default="json", type=click.Choice(["json", "human"]),
+              help="Output format. Default: json")
+@provider_options
+def cmd_analyze(chunks_json, output, top_n, padding_minutes, max_workers,
+                custom_prompt, fmt, provider, llm_model, api_key, base_url):
+    """Run LLM analysis on transcript chunks to find clip candidates."""
+    try:
+        if output is None:
+            output = str(Path(chunks_json).with_suffix("")) + "_clips.json"
+        chunks, total_duration = load_chunks(chunks_json)
+        client, model, _ = _resolve_provider(provider, llm_model, api_key, base_url)
+
+        if max_workers is None:
+            max_workers = 4 if provider == "claude_code" else 1
+
+        custom_list = list(custom_prompt) if custom_prompt else None
+        clips = find_clips(
+            chunks, client, top_n=top_n,
+            padding_seconds=padding_minutes * 60,
+            total_duration=total_duration,
+            model=model,
+            max_workers=max_workers,
+            custom_prompts=custom_list,
+        )
+        if clips:
+            save_results(clips, output)
+        _output({
+            "clips_path": output,
+            "clip_count": len(clips),
+            "clips": [asdict(c) for c in clips],
+        }, fmt)
+    except Exception as exc:
+        _error_json(str(exc))
+
+_register_meta("analyze",
+    inputs=[{"name": "chunks_json", "type": "path", "required": True}],
+    outputs=[{"name": "clips_path", "type": "path"}])
+
+
+# ── extract ──────────────────────────────────────────────────────────────────
+
+@cli.command("extract")
+@click.argument("mp4_file", type=click.Path(exists=True))
+@click.argument("clips_json", type=click.Path(exists=True))
+@click.option("--output-dir", "-o", default="./clips", help="Output directory. Default: ./clips")
+@click.option("--transcript", default=None, type=click.Path(exists=True),
+              help="Path to transcript JSON for per-clip transcript slicing")
+@click.option("--format", "fmt", default="json", type=click.Choice(["json", "human"]),
+              help="Output format. Default: json")
+def cmd_extract(mp4_file, clips_json, output_dir, transcript, fmt):
+    """Extract clip MP4s and sidecar assets from source video."""
+    try:
+        clips = load_clips_json(clips_json)
+        segments = load_transcript_from_json(transcript) if transcript else None
+
+        os.makedirs(output_dir, exist_ok=True)
+        extracted = []
+        for clip in clips:
+            console.log(f"[cyan]Extracting #{clip.rank}: {clip.title}[/cyan]")
+            try:
+                info = extract_clip_with_assets(clip, mp4_file, output_dir, segments)
+                extracted.append(info)
+                console.log(f"[green]  Done: {info['clip_name']}[/green]")
+            except Exception as exc:
+                console.log(f"[red]  Failed: {exc}[/red]")
+
+        _output({
+            "output_dir": output_dir,
+            "extracted_count": len(extracted),
+            "extracted": extracted,
+        }, fmt)
+    except Exception as exc:
+        _error_json(str(exc))
+
+_register_meta("extract",
+    inputs=[
+        {"name": "mp4_file", "type": "path", "required": True},
+        {"name": "clips_json", "type": "path", "required": True},
+    ],
+    outputs=[{"name": "output_dir", "type": "directory"}])
+
+
+# ── generate-slices ──────────────────────────────────────────────────────────
+
+@cli.command("generate-slices")
+@click.argument("clip_dir", type=click.Path(exists=True))
+@click.option("--editing-notes", default="", help="Custom editing instructions")
+@click.option("--premiere/--no-premiere", default=False,
+              help="Generate Premiere setup prompt")
+@click.option("--format", "fmt", default="json", type=click.Choice(["json", "human"]),
+              help="Output format. Default: json")
+@provider_options
+def cmd_generate_slices(clip_dir, editing_notes, premiere, fmt,
+                        provider, llm_model, api_key, base_url):
+    """Generate editing slices for an extracted clip directory using LLM."""
+    try:
+        client, model, _ = _resolve_provider(provider, llm_model, api_key, base_url)
+        result = generate_slices(
+            clip_dir, client, model,
+            editing_notes=editing_notes,
+            premiere=premiere,
+        )
+        _output(result, fmt)
+    except Exception as exc:
+        _error_json(str(exc))
+
+_register_meta("generate-slices",
+    inputs=[{"name": "clip_dir", "type": "directory", "required": True}],
+    outputs=[{"name": "slices", "type": "list"}])
+
+
+# ── providers ────────────────────────────────────────────────────────────────
+
+@cli.command("providers")
+@click.option("--format", "fmt", default="json", type=click.Choice(["json", "human"]),
+              help="Output format. Default: json")
+def cmd_providers(fmt):
+    """List available LLM providers and their models."""
+    from providers import PROVIDERS
+    result = []
+    for name, info in PROVIDERS.items():
+        env_key = info.get("env_key", "")
+        result.append({
+            "name": name,
+            "label": info.get("label", name),
+            "env_key": env_key,
+            "key_configured": bool(os.environ.get(env_key)) if env_key else True,
+            "default_model": info.get("default_model", ""),
+            "models": info.get("models", []),
+        })
+    _output({"providers": result}, fmt)
+
+
+# ── commands ─────────────────────────────────────────────────────────────────
+
+@cli.command("commands")
+@click.option("--format", "fmt", default="json", type=click.Choice(["json", "human"]),
+              help="Output format. Default: json")
+def cmd_commands(fmt):
+    """Machine-readable directory of all available CLI commands for AI agents."""
+    cmds = []
+    for name, cmd in sorted(cli.commands.items()):
+        if name == "commands":
+            continue
+        options = []
+        for param in cmd.params:
+            if isinstance(param, click.Argument):
+                continue
+            default = param.default
+            # Serialize non-JSON-safe defaults to string
+            try:
+                json.dumps(default)
+            except (TypeError, ValueError):
+                default = str(default) if default is not None else None
+            opt = {
+                "name": param.opts[0] if param.opts else param.name,
+                "type": param.type.name if hasattr(param.type, "name") else str(param.type),
+                "required": param.required,
+                "default": default,
+                "help": param.help or "",
+            }
+            options.append(opt)
+
+        meta = _COMMAND_META.get(name, {})
+        cmds.append({
+            "name": name,
+            "description": cmd.help or "",
+            "options": options,
+            "inputs": meta.get("inputs", []),
+            "outputs": meta.get("outputs", []),
+        })
+
+    _output(cmds, fmt)
+
+
+# ── run (full pipeline) ─────────────────────────────────────────────────────
+
+@cli.command("run")
+@click.argument("mp4_file", type=click.Path(exists=True))
+@click.option("--whisper-model", default="base",
+              type=click.Choice(["tiny", "base", "small", "medium", "large"]),
+              help="Whisper model size. Default: base")
+@click.option("--top-n", default=10, help="Max clip suggestions. Default: 10")
+@click.option("--window-minutes", default=5, help="Analysis window in minutes. Default: 5")
+@click.option("--transcript", default=None, help="Path to existing transcript JSON")
+@click.option("--save-transcript", "save_transcript_path", default=None,
+              help="Path to save transcript JSON")
+@click.option("--output-json", default=None, help="Path to save results JSON")
+@click.option("--export-clips-dir", default=None,
+              help="Directory for ffmpeg clip extraction script")
+@click.option("--audio-track", default=None, type=int,
+              help="0-based audio stream index")
+@click.option("--padding-minutes", default=3, type=float,
+              help="Context padding in minutes. Default: 3")
+@click.option("--max-workers", default=None, type=int,
+              help="Parallel analysis threads")
+@click.option("--custom-prompt", multiple=True,
+              help="Custom search criteria (repeatable)")
+@click.option("--format", "fmt", default="json", type=click.Choice(["json", "human"]),
+              help="Output format. Default: json")
+@provider_options
+def cmd_run(
+    mp4_file, whisper_model, top_n, window_minutes, transcript,
+    save_transcript_path, output_json, export_clips_dir, audio_track,
+    padding_minutes, max_workers, custom_prompt, fmt,
+    provider, llm_model, api_key, base_url,
+):
+    """Full pipeline: transcribe, analyze, and find clips in a long-form MP4.
+
+    Example:
+        python clip_finder.py run stream.mp4 --whisper-model small --top-n 10
+    """
+    try:
+        client, model, _ = _resolve_provider(provider, llm_model, api_key, base_url)
+
+        if max_workers is None:
+            max_workers = 4 if provider == "claude_code" else 1
+
+        console.print(Panel.fit(
+            "[bold cyan]StreamClipper[/bold cyan]\n[dim]Long-form -> Short-form clip finder[/dim]",
+            border_style="cyan"
+        ))
+
+        # Transcription
+        if transcript:
+            console.log(f"[cyan]Loading existing transcript:[/cyan] {transcript}")
+            segments = load_transcript_from_json(transcript)
+        else:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                wav_path = os.path.join(tmpdir, "audio.wav")
+                extract_audio(mp4_file, wav_path, audio_track=audio_track)
+                segments = transcribe_audio(wav_path, model_size=whisper_model)
+
+        if save_transcript_path:
+            save_transcript(segments, save_transcript_path)
+
+        if not segments:
+            _error_json("No transcript segments found.")
+
+        total_duration = segments[-1].end
+        console.log(f"[cyan]Total duration:[/cyan] {fmt_time(total_duration)}")
+
+        # Chunk & Analyze
+        chunks = chunk_transcript(segments, window_minutes=window_minutes)
+        custom_list = list(custom_prompt) if custom_prompt else None
+        clips = find_clips(
+            chunks, client, top_n=top_n,
+            padding_seconds=padding_minutes * 60,
+            total_duration=total_duration,
+            model=model,
+            max_workers=max_workers,
+            custom_prompts=custom_list,
+        )
+
+        if not clips and fmt == "human":
+            console.print("[yellow]No compelling clip suggestions found.[/yellow]")
+            sys.exit(0)
+
+        if fmt == "human":
+            print_results(clips)
+        if output_json:
+            save_results(clips, output_json)
+        if export_clips_dir:
+            export_ffmpeg_commands(clips, mp4_file, export_clips_dir)
+
+        _output({
+            "clip_count": len(clips),
+            "output_json": output_json,
+            "clips": [asdict(c) for c in clips],
+        }, fmt)
+    except Exception as exc:
+        _error_json(str(exc))
 
 
 if __name__ == "__main__":
-    main()
+    cli()

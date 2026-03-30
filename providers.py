@@ -548,6 +548,24 @@ class LLMClient:
         return resp.content[0].text
 
 
+def list_providers(check_keys: bool = True) -> list[dict]:
+    """Return provider info dicts with optional key_configured status."""
+    result = []
+    for name, info in PROVIDERS.items():
+        env_key = info.get("env_key", "")
+        entry = {
+            "name": name,
+            "label": info.get("label", name),
+            "env_key": env_key,
+            "default_model": info.get("default_model", ""),
+            "models": info.get("models", []),
+        }
+        if check_keys:
+            entry["key_configured"] = bool(os.environ.get(env_key)) if env_key else True
+        result.append(entry)
+    return result
+
+
 def make_client(provider: str, api_key: str, base_url: str = "") -> LLMClient:
     """Create an LLMClient for the given provider."""
     return LLMClient(provider, api_key, base_url=base_url)
