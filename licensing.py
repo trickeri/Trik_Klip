@@ -16,7 +16,17 @@ GUMROAD_VERIFY_URL = "https://api.gumroad.com/v2/licenses/verify"
 # ── UPDATE THIS with your Gumroad product ID ────────────────────────────────
 PRODUCT_ID = "G0vf5cY8nEQ8Cms7kstMuQ=="
 
-LICENSE_PATH = Path(__file__).parent / ".trik_klip_license"
+def _license_path() -> Path:
+    """Store the license in %APPDATA%/Trik_Klip so it survives rebuilds."""
+    import os
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        d = Path(appdata) / "Trik_Klip"
+        d.mkdir(exist_ok=True)
+        return d / ".trik_klip_license"
+    return Path(__file__).parent / ".trik_klip_license"
+
+LICENSE_PATH = _license_path()
 
 
 @dataclass

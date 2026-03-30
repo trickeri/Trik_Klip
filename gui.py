@@ -28,6 +28,11 @@ import threading
 import tempfile
 import subprocess
 import ctypes
+
+# Hide console windows spawned by subprocess on Windows (PyInstaller --windowed)
+_SUBPROCESS_FLAGS = (
+    subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+)
 import urllib.request
 import urllib.error
 import tkinter as tk
@@ -78,7 +83,7 @@ class GuiConsole:
         self._q.put(("log", _RICH_TAG.sub("", str(msg))))
 
 
-VERSION = "1.0.01_c"
+VERSION = "1.0.01_e"
 
 # ── Colour palette ────────────────────────────────────────────────────────────
 
@@ -282,6 +287,19 @@ class StreamClipperGUI:
         self._q: queue.Queue = queue.Queue()
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
+
+        # ── File logging ──
+        import logging
+        log_dir = Path(__file__).parent / "logs"
+        log_dir.mkdir(exist_ok=True)
+        from datetime import datetime
+        log_file = log_dir / f"trik_klip_{datetime.now():%Y%m%d_%H%M%S}.log"
+        self._file_logger = logging.getLogger("trik_klip")
+        self._file_logger.setLevel(logging.DEBUG)
+        _fh = logging.FileHandler(log_file, encoding="utf-8")
+        _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        self._file_logger.addHandler(_fh)
+        self._file_logger.info(f"Trik_Klip v{VERSION} started")
 
         # ── State variables ──
         self.mp4_path        = tk.StringVar()
@@ -1953,6 +1971,7 @@ Notes
             result = subprocess.run(
                 ["tasklist", "/FI", "IMAGENAME eq Adobe Premiere Pro.exe", "/NH"],
                 capture_output=True, text=True, timeout=5,
+                creationflags=_SUBPROCESS_FLAGS,
             )
             if "Adobe Premiere Pro.exe" not in result.stdout:
                 messagebox.showerror(
@@ -2268,7 +2287,8 @@ Notes
                     str(slice_path),
                 ]
                 res = subprocess.run(cmd, capture_output=True, text=True,
-                                     encoding="utf-8", errors="replace")
+                                     encoding="utf-8", errors="replace",
+                                     creationflags=_SUBPROCESS_FLAGS)
                 if res.returncode == 0:
                     total_dur += duration
                     written   += 1
@@ -2639,7 +2659,8 @@ Notes
                 try:
                     res = subprocess.run(cmd, capture_output=True,
                                         text=True, encoding="utf-8",
-                                        errors="replace")
+                                        errors="replace",
+                                        creationflags=_SUBPROCESS_FLAGS)
                     if res.returncode == 0:
                         self._q.put(("log", f"  ✓ → {out.name}\n"))
                     else:
@@ -2753,7 +2774,7 @@ Notes
                              dropdown_hover_color=ACCENT, text_color=TEXT, corner_radius=6)
         cb.grid(row=0, column=1, sticky="w", pady=4)
 
-        self._lbl(parent, "Top N Clips", 0, 2, padx=(20, 12))
+        self._lbl(parent, "Max Clips", 0, 2, padx=(20, 12))
         tk.Spinbox(parent, textvariable=self.top_n, from_=1, to=50, width=5,
                    bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT,
                    relief="flat", buttonbackground=BORDER
@@ -3109,7 +3130,7 @@ Notes
     def _run_full(self):
         self._q.put(("head", "=== Full Pipeline ===\n"))
         segments = self._do_transcription()
-        if segments is None:
+        if segments is None or self._cancel.is_set():
             return
 
         save_t = self.save_transcript.get().strip()
@@ -3118,6 +3139,9 @@ Notes
 
         if not segments:
             self._q.put(("err", "No transcript segments found.\n"))
+            return
+
+        if self._cancel.is_set():
             return
 
         client = self._make_client()
@@ -3199,6 +3223,10 @@ Notes
                 self._q.put(("whisper_done", None))
                 return None
             self._q.put(("audio_done", None))
+            if self._cancel.is_set():
+                self._q.put(("warn", "Cancelled.\n"))
+                self._q.put(("whisper_done", None))
+                return None
             self._q.put(("whisper_start", None))
             return cf.transcribe_audio(wav_path, model_size=self.whisper_model.get(),
                                        language=self._whisper_lang_code(),
@@ -3214,6 +3242,15 @@ Notes
                 self._q.put(("whisper_done", None))
                 return None
             self._q.put(("audio_done", None))
+            if self._cancel.is_set():
+                self._q.put(("warn", "Cancelled.\n"))
+                self._q.put(("whisper_done", None))
+                try:
+                    os.remove(wav_path)
+                    os.rmdir(tmpdir)
+                except OSError:
+                    pass
+                return None
             self._q.put(("whisper_start", None))
             segments = cf.transcribe_audio(wav_path, model_size=self.whisper_model.get(),
                                            language=self._whisper_lang_code(),
@@ -3477,6 +3514,11 @@ Notes
         t = self._log_text
         t.config(state="normal")
 
+        # Write text messages to log file
+        if kind in ("log", "ok", "err", "warn", "head", "dim") and isinstance(data, str):
+            level = {"err": "error", "warn": "warning"}.get(kind, "info")
+            getattr(self._file_logger, level)(data.rstrip())
+
         if kind == "log":
             t.insert("end", data)
         elif kind == "ok":
@@ -3722,7 +3764,8 @@ Notes
                 str(out_file)
             ]
             result = subprocess.run(cmd, capture_output=True, text=True,
-                                    encoding="utf-8", errors="replace")
+                                    encoding="utf-8", errors="replace",
+                                    creationflags=_SUBPROCESS_FLAGS)
             if result.returncode == 0:
                 self._q.put(("ok", f"    ✓ {out_file.name}\n"))
                 extracted_dirs.append(str(clip_dir))

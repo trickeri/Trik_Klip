@@ -9,8 +9,15 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import subprocess
 import urllib.request
 import urllib.error
+
+# Hide console windows spawned by subprocess on Windows (PyInstaller --windowed)
+_SUBPROCESS_FLAGS = (
+    subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+)
 
 
 # ── Provider registry ─────────────────────────────────────────────────────────
@@ -408,7 +415,6 @@ class LLMClient:
             return self._call_anthropic_fallback(model, user, system, max_tokens)
 
         import shutil
-        import subprocess
 
         claude_path = shutil.which("claude")
         if not claude_path:
@@ -417,14 +423,24 @@ class LLMClient:
                 "Install it or add it to your PATH. "
                 "See: https://docs.anthropic.com/en/docs/claude-code")
 
-        cmd = [claude_path, "-p", "--model", model]
-        if system:
-            cmd.extend(["--system-prompt", system])
+        cmd = [claude_path, "-p", "--model", model,
+               "--output-format", "json", "--tools", ""]
+
+        # Claude Code's internal system prompt overrides --system-prompt,
+        # so we prepend our instructions to the user message instead.
+        combined_input = f"{system}\n\n---\n\n{user}" if system else user
+
+        # Strip ANTHROPIC_API_KEY from the subprocess environment so that
+        # claude -p uses OAuth/subscription auth instead of the API key.
+        env = {k: v for k, v in os.environ.items()
+               if k != "ANTHROPIC_API_KEY"}
 
         try:
             result = subprocess.run(
-                cmd, input=user, capture_output=True, text=True,
+                cmd, input=combined_input, capture_output=True, text=True,
                 encoding="utf-8", timeout=300,
+                creationflags=_SUBPROCESS_FLAGS,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             raise RuntimeError(
@@ -463,36 +479,54 @@ class LLMClient:
 
         stdout = result.stdout.strip()
 
-        # Claude Code CLI may exit 0 but output a rate-limit error as
-        # plain text in stdout (not valid JSON).  Detect this before
-        # returning it as an "LLM response".
-        stdout_lower = stdout.lower()
-        _rate_phrases = (
-            "rate limit", "usage limit", "token limit",
-            "too many requests", "quota", "capacity", "exceeded",
-            "try again later", "billing",
-        )
-        if not stdout.startswith("{") and any(
-            p in stdout_lower for p in _rate_phrases
-        ):
-            self._cc_exhausted = True
-            if self.api_key:
-                self.fallback_activated = True
-                return self._call_anthropic_fallback(
-                    model, user, system, max_tokens)
-            raise ClaudeCodeRateLimitError(
-                f"Claude Code rate limit reached (exit 0 but non-JSON "
-                f"response).\n  stdout: {stdout[:300]}\n"
-                f"  Add an Anthropic API key in Settings to enable "
-                f"automatic fallback.")
-
         # Capture stderr warnings even on success (CLI may emit non-fatal
         # warnings about auth, updates, etc.)
         stderr = result.stderr.strip()
         if stderr:
             self._cc_stderr_warnings.append(stderr)
 
-        return stdout
+        # With --output-format json, stdout is a JSON envelope with a
+        # "result" field containing the actual LLM text.
+        _rate_phrases = (
+            "rate limit", "usage limit", "token limit",
+            "too many requests", "quota", "capacity", "exceeded",
+            "try again later", "billing",
+        )
+        try:
+            envelope = json.loads(stdout)
+            content = envelope.get("result", "")
+            is_error = envelope.get("is_error", False)
+            if is_error:
+                err_lower = content.lower()
+                if any(p in err_lower for p in _rate_phrases):
+                    self._cc_exhausted = True
+                    if self.api_key:
+                        self.fallback_activated = True
+                        return self._call_anthropic_fallback(
+                            model, user, system, max_tokens)
+                    raise ClaudeCodeRateLimitError(
+                        f"Claude Code rate limit reached.\n"
+                        f"  {content[:300]}\n"
+                        f"  Add an Anthropic API key in Settings to enable "
+                        f"automatic fallback.")
+                raise RuntimeError(
+                    f"Claude Code CLI error: {content[:500]}")
+            return content
+        except (json.JSONDecodeError, KeyError):
+            # Fallback: stdout wasn't valid JSON envelope (older CLI?)
+            stdout_lower = stdout.lower()
+            if any(p in stdout_lower for p in _rate_phrases):
+                self._cc_exhausted = True
+                if self.api_key:
+                    self.fallback_activated = True
+                    return self._call_anthropic_fallback(
+                        model, user, system, max_tokens)
+                raise ClaudeCodeRateLimitError(
+                    f"Claude Code rate limit reached (non-JSON "
+                    f"response).\n  stdout: {stdout[:300]}\n"
+                    f"  Add an Anthropic API key in Settings to enable "
+                    f"automatic fallback.")
+            return stdout
 
     # -- Anthropic API fallback (used when Claude Code CLI is rate-limited) ---
 

@@ -9,6 +9,23 @@
 
 ---
 
+## v1.0.01_e
+
+- Fixed Claude Code (Subscription) provider billing API credits instead of using subscription tokens. The CLI was picking up the `ANTHROPIC_API_KEY` environment variable and using it over OAuth auth. Now strips that env var from the subprocess so `claude -p` uses subscription tokens as intended.
+- Moved license activation file to `%APPDATA%/Trik_Klip/` so it persists across rebuilds and updates — users no longer need to re-enter their license key after updating.
+
+## v1.0.01_d
+
+- Fixed Claude Code CLI returning markdown instead of JSON. The `--system-prompt` flag was being ignored by the CLI's internal prompt, so analysis instructions are now passed in the user message instead, ensuring the model follows the correct JSON schema.
+- Fixed `--bare` flag silently billing users' API keys instead of using their subscription (OAuth auth was disabled by `--bare`). Removed the flag.
+- Fixed UnicodeEncodeError on Windows caused by `→` character in prompts. Added `encoding="utf-8"` to subprocess calls and reconfigured stdout/stderr to UTF-8 at startup.
+- Fixed console windows popping up during audio extraction, whisper transcription, and Claude Code CLI calls on Windows. Added `CREATE_NO_WINDOW` to all subprocess calls including a monkey-patch for Whisper's internal ffmpeg call.
+- Fixed cancel button not stopping the pipeline between audio extraction and whisper transcription. Added cancel checks between every pipeline step.
+- Added custom editing notes UI for the slice generation step (mirrors the custom search prompts for clip analysis).
+- Added file logging to `logs/` directory for debugging.
+- Renamed "Top N Clips" label to "Max Clips".
+- Rewrote analysis system prompt for stricter JSON schema compliance.
+
 ## v1.0.01_c
 
 - Fixed Claude Code subscription fallback not activating when user is out of tokens. The CLI exits 0 with the rate-limit error as plain text in stdout, which bypassed the previous detection. Now checks stdout for rate-limit phrases on exit code 0 and triggers the API fallback correctly.

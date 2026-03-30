@@ -29,6 +29,11 @@ import math
 import tempfile
 import subprocess
 from pathlib import Path
+
+# Hide console windows spawned by subprocess on Windows (PyInstaller --windowed)
+_SUBPROCESS_FLAGS = (
+    subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+)
 from dataclasses import dataclass, asdict
 from typing import Optional
 
@@ -96,6 +101,7 @@ def _get_duration(mp4_path: str) -> float | None:
             ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", mp4_path],
             capture_output=True, text=True,
+            creationflags=_SUBPROCESS_FLAGS,
         )
         return float(result.stdout.strip())
     except (ValueError, OSError):
@@ -134,7 +140,8 @@ def extract_audio(mp4_path: str, output_wav: str,
 
     if progress_cb and duration and duration > 0:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.PIPE, text=True)
+                                stderr=subprocess.PIPE, text=True,
+                                creationflags=_SUBPROCESS_FLAGS)
         for line in proc.stderr:
             line = line.strip()
             if line.startswith("out_time_us="):
@@ -150,7 +157,8 @@ def extract_audio(mp4_path: str, output_wav: str,
             sys.exit(1)
         progress_cb(100)
     else:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                creationflags=_SUBPROCESS_FLAGS)
         if result.returncode != 0:
             console.print(f"[red]ffmpeg error:[/red]\n{result.stderr}")
             sys.exit(1)
@@ -173,6 +181,27 @@ def transcribe_audio(wav_path: str, model_size: str = "base",
     except ImportError:
         console.print("[red]whisper not installed. Run: pip install openai-whisper[/red]")
         sys.exit(1)
+
+    # Monkey-patch whisper.audio.load_audio to hide the ffmpeg console
+    # window on Windows (it calls subprocess.run without CREATE_NO_WINDOW).
+    if sys.platform == "win32":
+        import whisper.audio as _wa
+        _orig_load = _wa.load_audio
+        def _patched_load(file, sr=16000):
+            from subprocess import run as _run, CalledProcessError
+            import numpy as np
+            cmd = [
+                "ffmpeg", "-nostdin", "-threads", "0",
+                "-i", file, "-f", "s16le", "-ac", "1",
+                "-acodec", "pcm_s16le", "-ar", str(sr), "-"
+            ]
+            try:
+                out = _run(cmd, capture_output=True, check=True,
+                           creationflags=_SUBPROCESS_FLAGS).stdout
+            except CalledProcessError as e:
+                raise RuntimeError(f"Failed to load audio: {e.stderr.decode()}") from e
+            return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
+        _wa.load_audio = _patched_load
 
     console.log(f"[cyan]Loading Whisper model:[/cyan] {model_size}")
     model = whisper.load_model(model_size)
@@ -295,32 +324,25 @@ def chunk_transcript(
 
 # ── Step 4: Analyze with Claude ──────────────────────────────────────────────
 
-ANALYSIS_SYSTEM_PROMPT = """You are an expert short-form content strategist with deep knowledge of what makes clips go viral on TikTok, YouTube Shorts, and Instagram Reels.
+ANALYSIS_SYSTEM_PROMPT = """You are a clip-finding assistant. You receive a transcript window and return a single JSON object. You NEVER return markdown, explanations, or commentary — ONLY raw JSON.
 
-You will be given a 5-minute transcript chunk from a long-form stream or podcast. Your job is to identify if there is a compelling 1–3 minute clip hidden inside it.
+TASK: Decide if the transcript contains a compelling 1-3 minute clip for TikTok/YouTube Shorts/Reels.
 
-A great clip has ONE OR MORE of:
-- A clear narrative arc or story with a beginning, middle, end
-- A surprising reveal, strong opinion, or counterintuitive take
-- A genuinely funny or emotional moment
-- Practical, actionable advice with clear stakes
-- A heated or interesting debate moment
-- A quotable, memorable one-liner or monologue
+A great clip has ONE OR MORE of: a narrative arc, a surprising reveal, a funny/emotional moment, actionable advice, a debate moment, or a quotable one-liner.
 
-Return ONLY valid JSON (no markdown fences, no extra text) in this exact schema:
-{
-  "has_clip": true or false,
-  "virality_score": 1-10,
-  "content_type": "story|advice|moment|debate|rant|revelation|other",
-  "title": "Short punchy title for the clip (max 60 chars)",
-  "hook": "One sentence explaining why someone would watch this",
-  "clip_start_offset": seconds from window_start where the clip should begin,
-  "clip_end_offset": seconds from window_start where the clip should end,
-  "transcript_excerpt": "The most compelling 1-2 sentences from this segment"
-}
+YOU MUST USE THIS EXACT JSON SCHEMA — do not invent your own fields:
 
-If there is no compelling clip, return {"has_clip": false}.
-clip_end_offset - clip_start_offset should be between 60 and 180 seconds."""
+{"has_clip": true, "virality_score": 7, "content_type": "story", "title": "Short Title Here", "hook": "Why someone would watch this", "clip_start_offset": 30, "clip_end_offset": 150, "transcript_excerpt": "Best 1-2 sentences from the segment"}
+
+RULES:
+- "has_clip": boolean — true if there's a good clip, false if not
+- "virality_score": integer 1-10
+- "content_type": one of "story", "advice", "moment", "debate", "rant", "revelation", "other"
+- "clip_start_offset": integer, seconds from the START of this window
+- "clip_end_offset": integer, seconds from the START of this window
+- clip_end_offset minus clip_start_offset must be between 60 and 180
+- If no good clip exists, return EXACTLY: {"has_clip": false}
+- Do NOT wrap in markdown fences. Do NOT add extra fields. Do NOT use a different schema."""
 
 
 _consecutive_errors = 0
@@ -365,7 +387,8 @@ def analyze_chunk(
     user_prompt = (
         f"Window timestamps: {fmt_time(chunk['window_start'])} → {fmt_time(chunk['window_end'])} "
         f"({window_duration/60:.1f} min)\n\n"
-        f"Transcript:\n{chunk['text']}"
+        f"Transcript:\n{chunk['text']}\n\n"
+        f"Respond with ONLY the JSON object. No markdown, no explanation, no code fences."
     )
 
     try:
