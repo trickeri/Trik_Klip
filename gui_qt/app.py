@@ -15,7 +15,15 @@ def _load_fonts():
     fonts_dir = Path(__file__).parent.parent / "fonts"
     if fonts_dir.is_dir():
         for ttf in fonts_dir.glob("*.ttf"):
-            QFontDatabase.addApplicationFont(str(ttf))
+            font_id = QFontDatabase.addApplicationFont(str(ttf))
+            if font_id == -1:
+                print(f"[FONT] FAILED to load: {ttf}", file=sys.stderr)
+            else:
+                families = QFontDatabase.applicationFontFamilies(font_id)
+                print(f"[FONT] Loaded {ttf} -> id={font_id}, families={families}",
+                      file=sys.stderr)
+    else:
+        print(f"[FONT] fonts dir not found: {fonts_dir}", file=sys.stderr)
 
 
 def main():

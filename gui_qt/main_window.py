@@ -9,9 +9,10 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QSplitter, QTabWidget, QScrollArea, QMessageBox, QApplication,
+    QPushButton,
 )
-from PySide6.QtGui import QFont, QClipboard
-from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont, QClipboard, QMouseEvent, QPainter, QBrush, QColor, QPainterPath, QIcon
+from PySide6.QtCore import Qt, QPoint, QRectF
 
 from gui_qt import theme
 from gui_qt.signals import WorkerSignals
@@ -42,8 +43,15 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"Trik_Klip v{VERSION}")
+        icon_path = Path(__file__).parent.parent / "assets" / "trik_klip.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+        self.setWindowFlags(Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMinimumSize(860, 1000)
         self.resize(860, 1000)
+        self._corner_radius = 12
+        self._drag_pos = None
 
         # Signals for worker communication
         self._signals = WorkerSignals()
@@ -58,29 +66,94 @@ class MainWindow(QMainWindow):
 
         # Central widget
         central = QWidget()
+        central.setStyleSheet("background: transparent;")
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # ── Header ───────────────────────────────────────────────────────
+        # ── Header (custom title bar) ────────────────────────────────────
         header = QWidget()
-        header.setFixedHeight(52)
-        header.setStyleSheet(f"background-color: {theme.ACCENT};")
+        header.setFixedHeight(62)
+        header.setStyleSheet(
+            f"background-color: {theme.ACCENT}; "
+            f"border-top-left-radius: {self._corner_radius}px; "
+            f"border-top-right-radius: {self._corner_radius}px;")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(16, 0, 16, 0)
+        header_layout.setContentsMargins(8, 0, 8, 0)
+
+        # Window control buttons (right side)
+        btn_style = (
+            "QPushButton { background: transparent; color: white; "
+            "border: none; font-size: 14pt; padding: 4px 10px; }"
+            "QPushButton:hover { background: rgba(255,255,255,0.15); "
+            "border-radius: 4px; }"
+        )
+        close_style = (
+            "QPushButton { background: transparent; color: white; "
+            "border: none; font-size: 14pt; padding: 4px 10px; }"
+            "QPushButton:hover { background: #e81123; border-radius: 4px; }"
+        )
+
+        btn_min = QPushButton("\u2013")
+        btn_min.setFixedSize(40, 36)
+        btn_min.setStyleSheet(btn_style)
+        btn_min.clicked.connect(self.showMinimized)
+
+        btn_max = QPushButton("\u25a1")
+        btn_max.setFixedSize(40, 36)
+        btn_max.setStyleSheet(btn_style)
+        btn_max.clicked.connect(
+            lambda: self.showNormal() if self.isMaximized()
+            else self.showMaximized())
+
+        btn_close = QPushButton("\u2715")
+        btn_close.setFixedSize(40, 36)
+        btn_close.setStyleSheet(close_style)
+        btn_close.clicked.connect(self.close)
+
+        # Invisible spacer matching the 3 buttons width (120px)
+        left_spacer = QWidget()
+        left_spacer.setFixedWidth(120)
+        left_spacer.setStyleSheet("background: transparent;")
+        header_layout.addWidget(left_spacer)
+
+        # Center: stacked title + version
+        title_block = QWidget()
+        title_block.setStyleSheet("background: transparent;")
+        title_vbox = QVBoxLayout(title_block)
+        title_vbox.setContentsMargins(0, 4, 0, 4)
+        title_vbox.setSpacing(0)
 
         logo = QLabel("Trik_Klip")
-        logo.setFont(QFont("Segoe UI", 18, QFont.Bold))
-        logo.setStyleSheet("color: white; background: transparent;")
-        header_layout.addWidget(logo)
+        logo.setAlignment(Qt.AlignCenter)
+        logo.setStyleSheet(
+            "color: white; background: transparent; "
+            "font-family: 'Segoe UI'; font-size: 18pt; font-weight: bold;")
+        title_vbox.addWidget(logo)
 
-        version_lbl = QLabel(f"v{VERSION}")
-        version_lbl.setStyleSheet(
-            "color: rgba(255,255,255,0.7); background: transparent; "
-            "font-size: 9pt;")
-        header_layout.addWidget(version_lbl)
+        subtitle = QLabel("Trik_Klip")
+        subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setStyleSheet(
+            "font-family: 'Nulgl_case2'; font-size: 10pt; font-weight: bold; "
+            "color: rgba(255,255,255,0.6); background: transparent;")
+        title_vbox.addWidget(subtitle)
+
         header_layout.addStretch()
+        header_layout.addWidget(title_block)
+        header_layout.addStretch()
+
+        header_layout.addWidget(btn_min)
+        header_layout.addWidget(btn_max)
+        header_layout.addWidget(btn_close)
+
+        # Make header draggable — install event filter so child widgets
+        # don't eat mouse events
+        header.installEventFilter(self)
+        for child in header.findChildren(QWidget):
+            child.installEventFilter(self)
+        # Store header ref for event filter
+        self._header = header
 
         main_layout.addWidget(header)
 
@@ -121,8 +194,8 @@ class MainWindow(QMainWindow):
         self._log = LogPanel()
         bottom_layout.addWidget(self._log, 1)
 
-        # Set splitter proportions (60% tabs, 40% log)
-        splitter.setSizes([600, 400])
+        # Set splitter proportions (80% tabs, 20% log)
+        splitter.setSizes([800, 200])
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, False)
 
@@ -295,6 +368,58 @@ class MainWindow(QMainWindow):
         model = profile.get("model", "")
         text = f"Profile: {label} / {model}"
         self._slice_tab.set_profile_text(text)
+
+    # ── Draggable header ───────────────────────────────────────────────
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        path = QPainterPath()
+        path.addRoundedRect(
+            QRectF(self.rect()), self._corner_radius, self._corner_radius)
+        painter.fillPath(path, QBrush(QColor(theme.BG)))
+
+    def eventFilter(self, obj, event):
+        """Handle dragging via event filter on header and its children."""
+        if not hasattr(self, '_header'):
+            return super().eventFilter(obj, event)
+
+        # Only intercept events from header or its children
+        is_header_widget = (obj is self._header or
+                            (obj.parent() and self._header.isAncestorOf(obj)))
+        # Don't intercept button clicks
+        if isinstance(obj, QPushButton):
+            is_header_widget = False
+
+        if not is_header_widget:
+            return super().eventFilter(obj, event)
+
+        if event.type() == event.Type.MouseButtonPress and event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            return True
+        elif event.type() == event.Type.MouseMove and self._drag_pos and event.buttons() & Qt.LeftButton:
+            if self.isMaximized():
+                old_width = self.width()
+                self.showNormal()
+                ratio = self._drag_pos.x() / max(old_width, 1)
+                new_x = int(event.globalPosition().x() - self.width() * ratio)
+                new_y = int(event.globalPosition().y() - self._drag_pos.y())
+                self._drag_pos = event.globalPosition().toPoint() - QPoint(new_x, new_y)
+                self.move(new_x, new_y)
+            else:
+                self.move(event.globalPosition().toPoint() - self._drag_pos)
+            return True
+        elif event.type() == event.Type.MouseButtonRelease:
+            self._drag_pos = None
+            return True
+        elif event.type() == event.Type.MouseButtonDblClick and event.button() == Qt.LeftButton:
+            if self.isMaximized():
+                self.showNormal()
+            else:
+                self.showMaximized()
+            return True
+
+        return super().eventFilter(obj, event)
 
     # ── Close ────────────────────────────────────────────────────────────
 

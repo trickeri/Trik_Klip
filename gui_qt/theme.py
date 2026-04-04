@@ -160,7 +160,15 @@ QComboBox QAbstractItemView {{
     color: {TEXT};
     border: 1px solid {BORDER};
     selection-background-color: {ACCENT};
+    selection-color: white;
     outline: none;
+}}
+QComboBox QAbstractItemView::item {{
+    padding: 5px 8px;
+}}
+QComboBox QAbstractItemView::item:hover {{
+    background-color: {ACCENT};
+    color: white;
 }}
 
 /* ── Checkboxes & Radio ───────────────────────────────── */
