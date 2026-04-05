@@ -1,0 +1,20 @@
+{
+  "name": "trik-klip",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/cli": "^2",
+    "svelte": "^5",
+    "typescript": "^5",
+    "vite": "^6"
+  }
+}

@@ -8,3 +8,18 @@ streamclipper_profiles.json
 build_env/
 build/
 dist/
+
+# Rust/Tauri
+target/
+node_modules/
+dist_python/
+build_python/
+logs/
+.buildenv/
+*.zip
+public/
+
+# Large bundled resources (ffmpeg, whisper binaries/models)
+src-tauri/resources/*.exe
+src-tauri/resources/*.dll
+src-tauri/resources/*.bin

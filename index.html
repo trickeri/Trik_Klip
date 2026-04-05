@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Trik Klip</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>
+      // Catch all errors and display them visually
+      window.onerror = function(msg, url, line, col, err) {
+        document.getElementById('app').innerHTML =
+          '<div style="padding:20px;color:red;font-family:monospace;background:#1e1e2e;height:100vh">' +
+          '<h2>JS Error</h2><pre>' + msg + '\n' + url + ':' + line + ':' + col +
+          '\n' + (err && err.stack ? err.stack : '') + '</pre></div>';
+      };
+      window.addEventListener('unhandledrejection', function(e) {
+        document.getElementById('app').innerHTML =
+          '<div style="padding:20px;color:red;font-family:monospace;background:#1e1e2e;height:100vh">' +
+          '<h2>Unhandled Promise Rejection</h2><pre>' + (e.reason && e.reason.stack ? e.reason.stack : e.reason) + '</pre></div>';
+      });
+    </script>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
