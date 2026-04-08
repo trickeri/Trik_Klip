@@ -1,89 +1,62 @@
-name: Release
+name: Distribute Release
 
-# Triggered when a GitHub release is published. See RELEASE.md for the full flow.
-# This workflow:
-#   1. Fetches upstream runtime binaries (ffmpeg, whisper.cpp, ggml model)
-#   2. Builds Tauri in release mode
-#   3. Assembles a portable zip containing the exe + resources folder
-#   4. Uploads the zip to Cloudflare R2 at releases/trik-klip/<version>/windows-x86_64.zip
-#   5. POSTs a release manifest to nuldrums.world/api/admin/title-releases
+# This workflow is a DISTRIBUTION-ONLY pipeline. The actual Trik_Klip binary
+# is built locally on the developer's Windows machine (required for the
+# Vulkan-accelerated whisper.cpp bundle, which is not available as a prebuilt
+# CI-friendly artifact) and attached to the GitHub release as an asset.
+#
+# When a release is published, this workflow:
+#   1. Downloads the portable zip from the release assets
+#   2. Uploads the zip to Cloudflare R2
+#   3. POSTs a release manifest to nuldrums.world/api/admin/title-releases
 #      (creates a DRAFT release — promote to active manually in the admin UI
 #       once you've verified it works)
-#   6. Attaches the zip to the GitHub Release as a downloadable asset
+#
+# See RELEASE.md for the full flow and the /deploy skill for the local build
+# + release creation steps.
 
 on:
   release:
     types: [published]
 
 jobs:
-  build-and-publish:
-    runs-on: windows-latest
+  distribute:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            .
-            src-tauri
-
-      - name: Install npm dependencies
-        run: npm ci
-
-      - name: Fetch runtime resources (ffmpeg, whisper, model)
-        shell: pwsh
-        run: .\scripts\fetch-resources.ps1
-
-      - name: Build Tauri app
-        run: npm run tauri build
-
-      - name: Read version from tauri.conf.json
+      - name: Parse version from tag
         id: version
         shell: bash
-        run: echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> $GITHUB_OUTPUT
-
-      - name: Assemble portable zip
-        id: zip
-        shell: pwsh
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          $version = "${{ steps.version.outputs.version }}"
-          $zipName = "trik-klip_${version}_windows-x86_64.zip"
-          $staging = "portable-staging"
+          # Strip the "v" prefix — tag is vX.X.X, version is X.X.X
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "zip_name=trik-klip_${VERSION}_windows-x86_64.zip" >> $GITHUB_OUTPUT
+          echo "Parsed version: $VERSION"
 
-          if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
-          New-Item -ItemType Directory -Path $staging | Out-Null
+      - name: Download portable zip from release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ github.event.release.tag_name }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "${{ steps.version.outputs.zip_name }}" \
+            --dir .
+          ls -lh "${{ steps.version.outputs.zip_name }}"
 
-          # The main exe and its companion CLI binary
-          Copy-Item "target/release/trik-klip.exe" "$staging/trik-klip.exe"
-          Copy-Item "target/release/trik-klip-cli.exe" "$staging/trik-klip-cli.exe"
-
-          # Runtime resources (fetched by scripts/fetch-resources.ps1)
-          New-Item -ItemType Directory -Path "$staging/resources" | Out-Null
-          Copy-Item "src-tauri/resources/*" "$staging/resources/" -Recurse -Force
-
-          # Create the zip
-          Compress-Archive -Path "$staging/*" -DestinationPath $zipName -Force
-
-          # Compute SHA-256 and size for the release manifest
-          $hash = (Get-FileHash -Path $zipName -Algorithm SHA256).Hash.ToLower()
-          $size = (Get-Item $zipName).Length
-
-          Write-Output "zip_path=$zipName" >> $env:GITHUB_OUTPUT
-          Write-Output "zip_sha256=$hash" >> $env:GITHUB_OUTPUT
-          Write-Output "zip_size=$size" >> $env:GITHUB_OUTPUT
-
-          Write-Host "Built $zipName"
-          Write-Host "  size:   $size bytes"
-          Write-Host "  sha256: $hash"
+      - name: Compute SHA-256 and size
+        id: meta
+        shell: bash
+        run: |
+          ZIP="${{ steps.version.outputs.zip_name }}"
+          SHA=$(sha256sum "$ZIP" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "$ZIP")
+          echo "sha256=$SHA" >> $GITHUB_OUTPUT
+          echo "size=$SIZE" >> $GITHUB_OUTPUT
+          echo "SHA-256: $SHA"
+          echo "Size:    $SIZE bytes"
 
       - name: Upload zip to Cloudflare R2
         shell: bash
@@ -93,7 +66,7 @@ jobs:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
         run: |
           aws s3 cp \
-            "${{ steps.zip.outputs.zip_path }}" \
+            "${{ steps.version.outputs.zip_name }}" \
             "s3://nuldrums-releases/releases/trik-klip/${{ steps.version.outputs.version }}/windows-x86_64.zip" \
             --endpoint-url "$R2_ENDPOINT"
 
@@ -108,8 +81,8 @@ jobs:
             --arg version "${{ steps.version.outputs.version }}" \
             --arg platform "windows-x86_64" \
             --arg archive_key "releases/trik-klip/${{ steps.version.outputs.version }}/windows-x86_64.zip" \
-            --arg archive_sha256 "${{ steps.zip.outputs.zip_sha256 }}" \
-            --argjson archive_size ${{ steps.zip.outputs.zip_size }} \
+            --arg archive_sha256 "${{ steps.meta.outputs.sha256 }}" \
+            --argjson archive_size ${{ steps.meta.outputs.size }} \
             --arg executable_path "trik-klip.exe" \
             --arg release_notes "$RELEASE_NOTES" \
             --argjson set_active false \
@@ -119,11 +92,8 @@ jobs:
             -H "x-api-key: $TITLE_RELEASE_API_KEY" \
             -d @-
 
-      - name: Attach zip to GitHub Release
+      - name: Summary
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
-            "${{ steps.zip.outputs.zip_path }}" \
-            --clobber
+          echo "::notice::Trik_Klip ${{ steps.version.outputs.version }} uploaded to R2 and registered as DRAFT on nuldrums.world"
+          echo "::notice::Promote to active via https://nuldrums.world/admin/titles"
