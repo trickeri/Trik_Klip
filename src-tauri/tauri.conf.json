@@ -1,6 +1,6 @@
 {
   "productName": "Trik Klip",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "identifier": "com.trikeri.trikklip",
   "build": {
     "frontendDist": "../dist",
@@ -18,7 +18,8 @@
         "minHeight": 700,
         "resizable": false,
         "fullscreen": false,
-        "decorations": false
+        "decorations": false,
+        "transparent": true
       }
     ],
     "security": {
