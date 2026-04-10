@@ -36,7 +36,7 @@ Releases are registered on the website in **draft** status by default. After the
    - **Confirm the new version with the user before proceeding.**
 
 3. **Update version in BOTH files** (they must match):
-   - `src-tauri/tauri.conf.json` — the Tauri build reads this
+   - `src-tauri/tauri.conf.json` — the Tauri build reads this (update both `"version"` and the `"title"` field which includes the version string)
    - `package.json` — the frontend's source of truth
 
 4. **Build locally** — this takes ~5-10 minutes:
@@ -115,6 +115,7 @@ Releases are registered on the website in **draft** status by default. After the
 - **`git push` fails (e.g., non-fast-forward):** the version bump is still in the local commit. Tell the user to resolve with `git pull --rebase` or similar, then re-run `git push`.
 - **`gh release create` fails AFTER the version bump has been pushed:** the commit is live but the release doesn't exist yet. Re-run just the `gh release create` step once resolved — the CI workflow will fire on the next successful release creation.
 - **CI workflow fails during distribution:** the zip is attached to the GH release and the version is pushed, but R2 upload or website registration failed. Investigate via `gh run view <id> --log-failed`. Common causes: stale `TITLE_RELEASE_API_KEY` secret, R2 credentials rolled, website endpoint down.
+- **CI workflow uses old workflow file:** GitHub Actions runs the workflow from the **tag ref**, not `main`. If the workflow file was changed after the tag was created, the old version runs. Fix: delete the release AND the tag, retag at HEAD, then recreate the release with the zip attached.
 
 ## Version scheme
 
