@@ -6,11 +6,15 @@ export const pipelineRunning = writable(false);
 export const currentStage = writable('');
 
 // Progress
+export const hashProgress = writable(0);
 export const audioProgress = writable(0);
 export const transcriptionProgress = writable(0);
 export const transcriptionLabel = writable('');
 export const analysisProgress = writable({ done: 0, total: 0 });
 export const extractionProgress = writable({ done: 0, total: 0, clip_name: '' });
+
+// Active tab — lets non-UI modules request tab switches (e.g. SSE → Extract on pipeline done).
+export const activeTab = writable(0);
 
 // Results
 export const clips = writable<ClipSuggestion[]>([]);
@@ -36,6 +40,7 @@ export function addLog(level: string, message: string) {
 
 // Reset progress state
 export function resetProgress() {
+    hashProgress.set(0);
     audioProgress.set(0);
     transcriptionProgress.set(0);
     transcriptionLabel.set('');

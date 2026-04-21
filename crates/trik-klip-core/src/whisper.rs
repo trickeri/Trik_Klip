@@ -7,6 +7,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
+use crate::cancel::{wait_cancelled, CancelRx};
 use crate::models::{ProgressEvent, TranscriptSegment};
 
 // ---------------------------------------------------------------------------
@@ -71,6 +72,7 @@ pub async fn transcribe(
     wav_path: &str,
     language: &str,
     progress_tx: Option<tokio::sync::broadcast::Sender<ProgressEvent>>,
+    mut cancel_rx: Option<CancelRx>,
 ) -> anyhow::Result<Vec<TranscriptSegment>> {
     info!(
         whisper_cli = whisper_cli_path,
@@ -127,11 +129,15 @@ pub async fn transcribe(
         })
     };
 
-    // ---------- wait for the process to finish ----------
-    let status = child
-        .wait()
-        .await
-        .context("Failed to wait on whisper-cli process")?;
+    // ---------- wait for the process to finish (or cancel) ----------
+    let status = tokio::select! {
+        s = child.wait() => s.context("Failed to wait on whisper-cli process")?,
+        _ = wait_cancelled(cancel_rx.as_mut()) => {
+            let _ = child.kill().await;
+            let _ = progress_handle.await;
+            bail!("Pipeline cancelled by user");
+        }
+    };
 
     // Make sure the progress reader finishes.
     let _ = progress_handle.await;

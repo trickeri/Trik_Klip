@@ -67,7 +67,7 @@
       await apiFetch('/pipeline/extract', {
         method: 'POST',
         body: JSON.stringify({
-          mp4_path: $mp4Path,
+          source_path: $mp4Path,
           clips: selected,
           output_dir: $outputDir || outDir || undefined,
         }),

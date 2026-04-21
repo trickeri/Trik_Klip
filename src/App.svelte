@@ -2,7 +2,9 @@
   import { onMount, onDestroy } from 'svelte';
   import { licenseValid } from './lib/stores';
 
+  import { activeTab as activeTabStore } from './lib/stores';
   let activeTab = $state(0);
+  activeTabStore.subscribe(v => { activeTab = v; });
   const tabs = ['Transcribe', 'Extract', 'Slice', 'Settings', 'About'];
   let mounted = $state(false);
   let loadError = $state('');
@@ -17,6 +19,7 @@
   let About: any = $state(null);
 
   let disconnectSSE: (() => void) | null = null;
+  let statusPollHandle: ReturnType<typeof setInterval> | null = null;
 
   onMount(async () => {
     console.log('[TrikKlip] App mounting...');
@@ -50,12 +53,52 @@
       console.error('[TrikKlip] SSE error:', e);
     }
 
+    try {
+      const { apiFetch } = await import('./lib/api');
+      const { activeProfile } = await import('./lib/stores');
+      const profiles = await apiFetch<Array<any>>('/profiles');
+      const def = profiles.find(p => p.is_default);
+      if (def) {
+        activeProfile.set({
+          provider: def.provider,
+          model: def.model,
+          api_key: def.api_key,
+          base_url: def.base_url,
+        });
+        console.log('[TrikKlip] Default profile loaded:', def.name);
+      }
+    } catch (e: any) {
+      console.error('[TrikKlip] Profile load error:', e);
+    }
+
+    // Safety-net status poll — reconciles client state with server if an SSE
+    // PipelineDone/PipelineError event is lost or delayed.
+    try {
+      const { apiFetch } = await import('./lib/api');
+      const { pipelineRunning, currentStage } = await import('./lib/stores');
+      let running = false;
+      pipelineRunning.subscribe(v => { running = v; });
+      statusPollHandle = setInterval(async () => {
+        if (!running) return;
+        try {
+          const status = await apiFetch<{ running: boolean }>('/pipeline/status');
+          if (!status.running && running) {
+            pipelineRunning.set(false);
+            currentStage.set('');
+          }
+        } catch {}
+      }, 2000);
+    } catch (e: any) {
+      console.error('[TrikKlip] Status poll setup error:', e);
+    }
+
     mounted = true;
     console.log('[TrikKlip] Mount complete');
   });
 
   onDestroy(() => {
     disconnectSSE?.();
+    if (statusPollHandle) clearInterval(statusPollHandle);
   });
 
   async function minimize() {
@@ -129,7 +172,7 @@
       <button
         class="tab"
         class:active={activeTab === i}
-        onclick={() => (activeTab = i)}
+        onclick={() => activeTabStore.set(i)}
       >
         {tab}
       </button>

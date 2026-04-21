@@ -1,12 +1,15 @@
 """Background workers using QThread + signals."""
 
+import io
 import os
 import re
 import sys
 import tempfile
 import threading
+import time
 
 from PySide6.QtCore import QThread
+from rich.console import Console as RichConsole
 
 import clip_finder as cf
 from gui_qt.signals import WorkerSignals
@@ -16,13 +19,24 @@ class GuiConsole:
     """Adapter that redirects cf.console calls to WorkerSignals.
 
     Replaces the rich Console so pipeline functions can emit log messages
-    to the GUI without knowing about Qt.
+    to the GUI without knowing about Qt. Unknown attributes fall through to a
+    real (buffered) rich Console so rich internals like Progress/Status that
+    call things like `get_time`, `is_terminal`, `size`, etc. keep working.
     """
 
     _TAG_RE = re.compile(r"\[/?[^\]]*\]")
 
     def __init__(self, signals: WorkerSignals):
         self._signals = signals
+        # Fallback for anything not overridden below. Writing to a StringIO
+        # buffer means rich's output (bars, tables) is harmlessly discarded
+        # while its internal plumbing (timers, sizing) still works.
+        self._fallback = RichConsole(file=io.StringIO(), force_terminal=False)
+
+    def __getattr__(self, name):
+        # __getattr__ is only invoked when normal lookup fails, so it won't
+        # shadow any of the explicit methods below.
+        return getattr(self._fallback, name)
 
     def _strip(self, text: str) -> str:
         return self._TAG_RE.sub("", str(text))
@@ -34,6 +48,10 @@ class GuiConsole:
     def print(self, *args, **kwargs):
         text = " ".join(str(a) for a in args)
         self._signals.log.emit(self._strip(text) + "\n")
+
+    # Rich's Progress calls this to timestamp events.
+    def get_time(self):
+        return time.monotonic()
 
     # Match rich Console interface methods the pipeline might call
     def rule(self, *a, **kw):

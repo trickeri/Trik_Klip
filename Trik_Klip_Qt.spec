@@ -26,7 +26,10 @@ hiddenimports += [
 datas += collect_data_files('PySide6', includes=['*.pyi', 'qt.conf'])
 
 # Whisper — installed as openai-whisper, package name is 'whisper'
+# The assets/ folder (mel_filters.npz, *.tiktoken) is loaded at runtime and
+# must be bundled alongside the submodules.
 hiddenimports += collect_submodules('whisper')
+datas += collect_data_files('whisper')
 
 # Project data files
 datas += [

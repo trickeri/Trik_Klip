@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
+  import { getCurrentWebview } from '@tauri-apps/api/webview';
+
   export let filePath = '';
   export let onSelect: (path: string) => void = () => {};
   export let accept = '.mp4';
@@ -6,32 +9,48 @@
 
   let dragging = false;
   let fileInput: HTMLInputElement;
+  let dropzoneEl: HTMLDivElement;
+  let unlisten: (() => void) | null = null;
 
-  function handleDragOver(e: DragEvent) {
-    e.preventDefault();
-    if (!disabled) dragging = true;
+  function isOverDropzone(px: number, py: number): boolean {
+    if (!dropzoneEl) return false;
+    const rect = dropzoneEl.getBoundingClientRect();
+    // Tauri drag-drop positions are in physical pixels; CSS rects are logical.
+    const dpr = window.devicePixelRatio || 1;
+    const x = px / dpr;
+    const y = py / dpr;
+    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
   }
 
-  function handleDragLeave() {
-    dragging = false;
-  }
-
-  function handleDrop(e: DragEvent) {
-    e.preventDefault();
-    dragging = false;
-    if (disabled) return;
-
-    const files = e.dataTransfer?.files;
-    if (files && files.length > 0) {
-      const file = files[0];
-      if (file.name.endsWith('.mp4')) {
-        // In Tauri, dataTransfer gives us the full path
-        const path = (file as any).path || file.name;
-        filePath = path;
-        onSelect(path);
+  onMount(async () => {
+    unlisten = await getCurrentWebview().onDragDropEvent((event) => {
+      if (disabled) {
+        dragging = false;
+        return;
       }
-    }
-  }
+      const p = event.payload;
+      if (p.type === 'enter' || p.type === 'over') {
+        const pos = (p as any).position;
+        dragging = pos ? isOverDropzone(pos.x, pos.y) : false;
+      } else if (p.type === 'leave') {
+        dragging = false;
+      } else if (p.type === 'drop') {
+        dragging = false;
+        const pos = (p as any).position;
+        if (!pos || !isOverDropzone(pos.x, pos.y)) return;
+        const paths = (p as any).paths as string[] | undefined;
+        const match = paths?.find((f) => f.toLowerCase().endsWith('.mp4'));
+        if (match) {
+          filePath = match;
+          onSelect(match);
+        }
+      }
+    });
+  });
+
+  onDestroy(() => {
+    if (unlisten) unlisten();
+  });
 
   function handleClick() {
     if (!disabled) {
@@ -53,13 +72,11 @@
 <!-- svelte-ignore a11y-no-static-element-interactions -->
 <!-- svelte-ignore a11y-click-events-have-key-events -->
 <div
+  bind:this={dropzoneEl}
   class="dropzone"
   class:dragging
   class:disabled
   class:has-file={!!filePath}
-  on:dragover={handleDragOver}
-  on:dragleave={handleDragLeave}
-  on:drop={handleDrop}
   on:click={handleClick}
   role="button"
   tabindex="0"

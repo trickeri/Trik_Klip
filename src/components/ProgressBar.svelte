@@ -3,6 +3,7 @@
   export let value = 0;
   export let max = 100;
   export let showCount = false;
+  export let indeterminate = false;
 
   $: percent = max > 0 ? Math.min(100, (value / max) * 100) : 0;
   $: displayText = showCount ? `${value} / ${max}` : `${Math.round(percent)}%`;
@@ -13,14 +14,20 @@
     {#if label}
       <span class="progress-label">{label}</span>
     {/if}
-    <span class="progress-value">{displayText}</span>
+    {#if !indeterminate}
+      <span class="progress-value">{displayText}</span>
+    {/if}
   </div>
   <div class="progress-track">
-    <div
-      class="progress-fill"
-      style="width: {percent}%"
-      class:complete={percent >= 100}
-    ></div>
+    {#if indeterminate}
+      <div class="progress-indeterminate"></div>
+    {:else}
+      <div
+        class="progress-fill"
+        style="width: {percent}%"
+        class:complete={percent >= 100}
+      ></div>
+    {/if}
   </div>
 </div>
 
@@ -63,5 +70,29 @@
 
   .progress-fill.complete {
     background: var(--success);
+  }
+
+  .progress-indeterminate {
+    position: relative;
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+  }
+
+  .progress-indeterminate::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    width: 40%;
+    background: var(--accent);
+    border-radius: 3px;
+    animation: indeterminate 1.2s ease-in-out infinite;
+  }
+
+  @keyframes indeterminate {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(250%); }
   }
 </style>

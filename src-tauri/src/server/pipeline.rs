@@ -170,22 +170,53 @@ fn check_cancel(cancel_rx: &mut watch::Receiver<bool>) -> Result<()> {
 // File hashing
 // ---------------------------------------------------------------------------
 
-async fn hash_file(path: &str) -> Result<String> {
+async fn hash_file(
+    path: &str,
+    cancel_rx: &mut watch::Receiver<bool>,
+    progress_tx: Option<&tokio::sync::broadcast::Sender<ProgressEvent>>,
+) -> Result<String> {
     use tokio::io::AsyncReadExt;
 
     let mut file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("Cannot open file for hashing: {}", path))?;
 
+    let total_bytes = file
+        .metadata()
+        .await
+        .ok()
+        .map(|m| m.len())
+        .filter(|&n| n > 0);
+
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1024 * 1024]; // 1 MB chunks
+    let mut read_so_far: u64 = 0;
+    let mut last_percent: u8 = 0;
+
+    if progress_tx.is_some() && total_bytes.is_some() {
+        if let Some(tx) = progress_tx {
+            let _ = tx.send(ProgressEvent::Hashing { percent: 0 });
+        }
+    }
 
     loop {
+        if *cancel_rx.borrow() {
+            anyhow::bail!("Pipeline cancelled by user");
+        }
         let n = file.read(&mut buf).await?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
+        read_so_far += n as u64;
+
+        if let (Some(tx), Some(total)) = (progress_tx, total_bytes) {
+            let pct = ((read_so_far as f64 / total as f64) * 100.0).clamp(0.0, 100.0) as u8;
+            if pct != last_percent {
+                last_percent = pct;
+                let _ = tx.send(ProgressEvent::Hashing { percent: pct });
+            }
+        }
     }
 
     Ok(hex::encode(hasher.finalize()))
@@ -253,6 +284,9 @@ pub async fn run_full_pipeline(
         anyhow::bail!("Pipeline is already running");
     }
 
+    // Clear any stale cancel signal from a prior run.
+    let _ = state.cancel_tx.send(false);
+
     let result = run_full_pipeline_inner(state.clone(), params).await;
 
     // Always reset running flag
@@ -261,7 +295,10 @@ pub async fn run_full_pipeline(
     let _ = state.cancel_tx.send(false);
 
     match &result {
-        Ok(_) => {
+        Ok(pipe_result) => {
+            let _ = state.progress_tx.send(ProgressEvent::ClipsReady {
+                clips: pipe_result.clips.clone(),
+            });
             let _ = state.progress_tx.send(ProgressEvent::PipelineDone);
         }
         Err(e) => {
@@ -286,7 +323,7 @@ async fn run_full_pipeline_inner(
         level: "info".into(),
         message: "Computing file hash...".into(),
     });
-    let file_hash = hash_file(&params.source_path).await?;
+    let file_hash = hash_file(&params.source_path, &mut cancel_rx, Some(tx)).await?;
     check_cancel(&mut cancel_rx)?;
 
     // Check for cached transcript
@@ -315,6 +352,7 @@ async fn run_full_pipeline_inner(
                 &wav_path.to_string_lossy(),
                 params.audio_track,
                 Some(tx.clone()),
+                Some(cancel_rx.clone()),
             )
             .await?;
             let wp = wav_path.to_string_lossy().to_string();
@@ -338,6 +376,7 @@ async fn run_full_pipeline_inner(
             &wav_path.to_string_lossy(),
             params.audio_track,
             Some(tx.clone()),
+            Some(cancel_rx.clone()),
         )
         .await?;
         check_cancel(&mut cancel_rx)?;
@@ -366,6 +405,7 @@ async fn run_full_pipeline_inner(
             &wav_path.to_string_lossy(),
             &params.language,
             Some(tx.clone()),
+            Some(cancel_rx.clone()),
         )
         .await?;
         check_cancel(&mut cancel_rx)?;
@@ -420,7 +460,7 @@ async fn run_full_pipeline_inner(
     let api_key = resolve_api_key(&state, &params.provider, params.api_key.as_deref());
     let base_url = resolve_base_url(&state, &params.provider, params.base_url.as_deref());
     let provider_box =
-        make_provider(&params.provider, &api_key, &base_url, state.http_client.clone())?;
+        make_provider(&params.provider, &api_key, &base_url, state.http_client.clone(), Some(cancel_rx.clone()))?;
     let provider_arc: Arc<dyn trik_klip_core::llm::LlmProvider> = Arc::from(provider_box);
 
     let custom_prompts_ref = params.custom_prompts.as_deref();
@@ -461,6 +501,9 @@ pub async fn run_transcribe_only(
         anyhow::bail!("Pipeline is already running");
     }
 
+    // Clear any stale cancel signal from a prior run.
+    let _ = state.cancel_tx.send(false);
+
     let result = run_transcribe_only_inner(state.clone(), params).await;
 
     state.pipeline_running.store(false, Ordering::SeqCst);
@@ -487,7 +530,7 @@ async fn run_transcribe_only_inner(
     let mut cancel_rx = state.cancel_tx.subscribe();
     let tx = &state.progress_tx;
 
-    let file_hash = hash_file(&params.source_path).await?;
+    let file_hash = hash_file(&params.source_path, &mut cancel_rx, Some(tx)).await?;
     check_cancel(&mut cancel_rx)?;
 
     // Check cache
@@ -516,6 +559,7 @@ async fn run_transcribe_only_inner(
         &wav_path.to_string_lossy(),
         params.audio_track,
         Some(tx.clone()),
+        Some(cancel_rx.clone()),
     )
     .await?;
     check_cancel(&mut cancel_rx)?;
@@ -535,6 +579,7 @@ async fn run_transcribe_only_inner(
         &wav_path.to_string_lossy(),
         &params.language,
         Some(tx.clone()),
+        Some(cancel_rx.clone()),
     )
     .await?;
     check_cancel(&mut cancel_rx)?;
@@ -585,13 +630,19 @@ pub async fn run_analyze_only(
         anyhow::bail!("Pipeline is already running");
     }
 
+    // Clear any stale cancel signal from a prior run.
+    let _ = state.cancel_tx.send(false);
+
     let result = run_analyze_only_inner(state.clone(), params).await;
 
     state.pipeline_running.store(false, Ordering::SeqCst);
     let _ = state.cancel_tx.send(false);
 
     match &result {
-        Ok(_) => {
+        Ok(pipe_result) => {
+            let _ = state.progress_tx.send(ProgressEvent::ClipsReady {
+                clips: pipe_result.clips.clone(),
+            });
             let _ = state.progress_tx.send(ProgressEvent::PipelineDone);
         }
         Err(e) => {
@@ -642,7 +693,7 @@ async fn run_analyze_only_inner(
     let api_key = resolve_api_key(&state, &params.provider, params.api_key.as_deref());
     let base_url = resolve_base_url(&state, &params.provider, params.base_url.as_deref());
     let provider_box =
-        make_provider(&params.provider, &api_key, &base_url, state.http_client.clone())?;
+        make_provider(&params.provider, &api_key, &base_url, state.http_client.clone(), Some(cancel_rx.clone()))?;
     let provider_arc: Arc<dyn trik_klip_core::llm::LlmProvider> = Arc::from(provider_box);
 
     let custom_prompts_ref = params.custom_prompts.as_deref();
@@ -682,6 +733,9 @@ pub async fn run_extract_clips(
     {
         anyhow::bail!("Pipeline is already running");
     }
+
+    // Clear any stale cancel signal from a prior run.
+    let _ = state.cancel_tx.send(false);
 
     let result = run_extract_clips_inner(state.clone(), params).await;
 
@@ -743,6 +797,7 @@ async fn run_extract_clips_inner(
             &clip_path.to_string_lossy(),
             clip.clip_start,
             duration,
+            Some(cancel_rx.clone()),
         )
         .await?;
 
@@ -782,6 +837,9 @@ pub async fn run_generate_slices(
     {
         anyhow::bail!("Pipeline is already running");
     }
+
+    // Clear any stale cancel signal from a prior run.
+    let _ = state.cancel_tx.send(false);
 
     let result = run_generate_slices_inner(state.clone(), params).await;
 
@@ -823,7 +881,7 @@ async fn run_generate_slices_inner(
     let api_key = resolve_api_key(&state, &params.provider, params.api_key.as_deref());
     let base_url = resolve_base_url(&state, &params.provider, params.base_url.as_deref());
     let provider_box =
-        make_provider(&params.provider, &api_key, &base_url, state.http_client.clone())?;
+        make_provider(&params.provider, &api_key, &base_url, state.http_client.clone(), Some(cancel_rx.clone()))?;
 
     let _ = tx.send(ProgressEvent::Log {
         level: "info".into(),
@@ -890,6 +948,7 @@ async fn run_generate_slices_inner(
             &slice_path.to_string_lossy(),
             seek,
             duration,
+            Some(cancel_rx.clone()),
         )
         .await?;
 

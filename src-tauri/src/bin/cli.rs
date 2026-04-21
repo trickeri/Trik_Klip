@@ -198,7 +198,7 @@ fn create_provider(
     let key = api_key.as_deref().unwrap_or("");
     let url = base_url.as_deref().unwrap_or("");
     let client = reqwest::Client::new();
-    llm::make_provider(provider_key, key, url, client)
+    llm::make_provider(provider_key, key, url, client, None)
 }
 
 /// Default output path: replace extension on input path.
@@ -256,6 +256,7 @@ async fn run_command(cli: Cli) -> Result<()> {
                 &mp4_str,
                 &wav_str,
                 audio_track,
+                None,
                 None,
             )
             .await?;
@@ -322,6 +323,7 @@ async fn run_command(cli: Cli) -> Result<()> {
                 &cli.model_path,
                 &wav_str,
                 &language,
+                None,
                 None,
             )
             .await?;
@@ -485,6 +487,7 @@ async fn run_command(cli: Cli) -> Result<()> {
                     &clip_mp4.to_string_lossy(),
                     clip.clip_start,
                     duration,
+                    None,
                 )
                 .await?;
 
@@ -624,6 +627,7 @@ async fn run_command(cli: Cli) -> Result<()> {
                     &slice_path.to_string_lossy(),
                     seek,
                     dur,
+                    None,
                 )
                 .await?;
 
@@ -773,6 +777,7 @@ async fn run_command(cli: Cli) -> Result<()> {
                 &wav_str,
                 audio_track,
                 None,
+                None,
             )
             .await?;
 
@@ -795,6 +800,7 @@ async fn run_command(cli: Cli) -> Result<()> {
                 &cli.model_path,
                 &wav_str,
                 &language,
+                None,
                 None,
             )
             .await?;
@@ -872,6 +878,7 @@ async fn run_command(cli: Cli) -> Result<()> {
                     &clip_mp4.to_string_lossy(),
                     clip.clip_start,
                     duration,
+                    None,
                 )
                 .await?;
 

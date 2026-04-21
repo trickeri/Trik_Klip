@@ -40,6 +40,7 @@ pub struct AnalysisChunk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ProgressEvent {
+    Hashing { percent: u8 },
     AudioExtraction { percent: u8 },
     SpikeDetection { spike_count: usize },
     Transcription { percent: u8, label: String },
@@ -47,6 +48,7 @@ pub enum ProgressEvent {
     Analysis { done: usize, total: usize },
     ClipExtraction { done: usize, total: usize, clip_name: String },
     SliceGeneration { done: usize, total: usize },
+    ClipsReady { clips: Vec<ClipSuggestion> },
     Log { level: String, message: String },
     PipelineDone,
     PipelineError { message: String },

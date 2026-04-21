@@ -216,6 +216,7 @@ async fn list_providers_handler(
 ) -> Json<Vec<ProviderListEntry>> {
     let providers = provider_registry::list_providers();
     let settings = &state.settings;
+    let model_cache = state.provider_models.read().await;
 
     let mut entries: Vec<ProviderListEntry> = providers
         .into_iter()
@@ -229,11 +230,15 @@ async fn list_providers_handler(
                 "claude_code" => true, // uses CLI
                 _ => false,
             };
+            let models = model_cache
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| info.models.clone());
             ProviderListEntry {
                 key: key.to_string(),
                 label: info.label,
                 default_model: info.default_model,
-                models: info.models,
+                models,
                 has_key,
             }
         })
@@ -300,6 +305,14 @@ async fn provider_models(
             return Err(AppError::NotFound(format!("Unknown provider: {}", other)));
         }
     };
+
+    if !models.is_empty() {
+        state
+            .provider_models
+            .write()
+            .await
+            .insert(name.clone(), models.clone());
+    }
 
     Ok(Json(models))
 }

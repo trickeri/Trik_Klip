@@ -29,11 +29,11 @@ export interface ProviderProfile {
 }
 
 export interface PipelineParams {
-  mp4_path: string;
+  source_path: string;
   whisper_model: string;
   language: string;
   top_n: number;
-  padding_minutes: number;
+  padding_seconds: number;
   window_minutes: number;
   overlap_minutes: number;
   audio_track?: number;

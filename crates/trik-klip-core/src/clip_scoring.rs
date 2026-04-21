@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use serde::Deserialize;
 use tokio::task::JoinSet;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::llm::provider::LlmProvider;
 use crate::models::{fmt_time, AnalysisChunk, ClipSuggestion, ProgressEvent};
@@ -74,16 +74,31 @@ async fn analyze_chunk(
     };
 
     let cleaned = strip_fences(&response.text);
+    let response_preview: String = cleaned.chars().take(250).collect();
+    info!(
+        "LLM response for chunk at {} ({} chars): {:?}",
+        fmt_time(chunk.window_start),
+        cleaned.len(),
+        response_preview,
+    );
 
     match serde_json::from_str::<ChunkAnalysis>(cleaned) {
-        Ok(analysis) => Some(analysis),
+        Ok(analysis) => {
+            info!(
+                "Parsed chunk at {}: has_clip={}, score={}, title={:?}",
+                fmt_time(chunk.window_start),
+                analysis.has_clip,
+                analysis.virality_score,
+                analysis.title,
+            );
+            Some(analysis)
+        }
         Err(e) => {
-            let preview: String = cleaned.chars().take(200).collect();
             warn!(
                 "Could not parse LLM response for chunk at {}: {}. Preview: {:?}",
                 fmt_time(chunk.window_start),
                 e,
-                preview,
+                response_preview,
             );
             None
         }
@@ -123,6 +138,12 @@ pub async fn find_clips(
     progress_tx: Option<&tokio::sync::broadcast::Sender<ProgressEvent>>,
 ) -> Vec<ClipSuggestion> {
     let total = chunks.len();
+    info!(
+        "find_clips: starting analysis of {} chunks, top_n={}, provider={}",
+        total,
+        top_n,
+        provider.provider_name()
+    );
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_workers));
     let mut join_set: JoinSet<Option<(usize, ChunkAnalysis)>> = JoinSet::new();
 
@@ -216,6 +237,8 @@ pub async fn find_clips(
         });
     }
 
+    let candidates_len = candidates.len();
+
     // Sort by virality score descending
     candidates.sort_by(|a, b| b.score.cmp(&a.score));
 
@@ -254,6 +277,13 @@ pub async fn find_clips(
             break;
         }
     }
+
+    info!(
+        "find_clips: finished. {} chunks analyzed, {} candidates (has_clip=true), {} selected after dedup",
+        total,
+        candidates_len,
+        selected.len(),
+    );
 
     selected
 }

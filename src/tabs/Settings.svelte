@@ -4,12 +4,22 @@
   import { apiFetch } from '../lib/api';
   import type { ProviderProfile } from '../lib/types';
 
+  interface ProviderEntry {
+    key: string;
+    label: string;
+    default_model: string;
+    models: string[];
+    has_key: boolean;
+  }
+
   let profiles: ProviderProfile[] = [];
-  let providers: string[] = [];
+  let providers: ProviderEntry[] = [];
   let models: string[] = [];
   let selectedProfileId = '';
   let loading = true;
   let showApiKey = false;
+  let refreshingModels = false;
+  let modelsError = '';
 
   // Language
   let selectedLanguage = 'en';
@@ -68,18 +78,23 @@
 
   async function loadProviders() {
     try {
-      providers = await apiFetch<string[]>('/providers');
+      providers = await apiFetch<ProviderEntry[]>('/providers');
     } catch (e: any) {
       addLog('error', `Failed to load providers: ${e.message}`);
     }
   }
 
   async function loadModels(provider: string) {
-    if (!provider) { models = []; return; }
+    if (!provider) { models = []; modelsError = ''; return; }
+    refreshingModels = true;
+    modelsError = '';
     try {
       models = await apiFetch<string[]>(`/providers/${provider}/models`);
-    } catch {
+    } catch (e: any) {
       models = [];
+      modelsError = e.message || 'Could not load models';
+    } finally {
+      refreshingModels = false;
     }
   }
 
@@ -119,7 +134,7 @@
     creating = true;
     selectedProfileId = '';
     editName = '';
-    editProvider = providers[0] || '';
+    editProvider = providers[0]?.key || '';
     editModel = '';
     editApiKey = '';
     editBaseUrl = '';
@@ -247,7 +262,7 @@
         <select bind:value={editProvider} on:change={handleProviderChange}>
           <option value="">Select provider...</option>
           {#each providers as prov}
-            <option value={prov}>{providerLabel(prov)}</option>
+            <option value={prov.key}>{prov.label || providerLabel(prov.key)}</option>
           {/each}
         </select>
       </div>
@@ -269,18 +284,30 @@
 
       <div class="form-row-inline">
         <span class="row-label">Model</span>
-        {#if models.length > 0}
-          <select bind:value={editModel}>
-            <option value="">Default</option>
-            {#each models as m}
-              <option value={m}>{m}</option>
-            {/each}
-          </select>
-        {:else}
-          <input type="text" bind:value={editModel} placeholder="Model name" />
-        {/if}
-        <button class="btn btn-small btn-secondary" on:click={() => loadModels(editProvider)}>Refresh</button>
+        <input
+          type="text"
+          bind:value={editModel}
+          list="model-suggestions"
+          placeholder="Leave empty for default, or type a model name"
+        />
+        <datalist id="model-suggestions">
+          {#each models as m}
+            <option value={m}></option>
+          {/each}
+        </datalist>
+        <button
+          class="btn btn-small btn-secondary"
+          on:click={() => loadModels(editProvider)}
+          disabled={refreshingModels || !editProvider}
+        >
+          {refreshingModels ? 'Refreshing...' : 'Refresh'}
+        </button>
       </div>
+      {#if modelsError}
+        <span class="env-hint" style="color: var(--error);">{modelsError}</span>
+      {:else if models.length > 0}
+        <span class="env-hint">{models.length} known model{models.length === 1 ? '' : 's'} — type to filter or enter a custom name</span>
+      {/if}
 
       <div class="form-actions">
         <button class="btn btn-primary btn-small" on:click={saveProfile} disabled={!editName || !editProvider}>

@@ -1,4 +1,5 @@
 pub mod models;
+pub mod cancel;
 pub mod ffmpeg;
 pub mod whisper;
 pub mod spike_detection;

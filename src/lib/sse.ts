@@ -1,6 +1,9 @@
 const BASE = "http://127.0.0.1:31416";
 
+import type { ClipSuggestion } from './types';
+
 export type ProgressEvent =
+  | { type: "Hashing"; percent: number }
   | { type: "AudioExtraction"; percent: number }
   | { type: "SpikeDetection"; spike_count: number }
   | { type: "Transcription"; percent: number; label: string }
@@ -8,6 +11,7 @@ export type ProgressEvent =
   | { type: "Analysis"; done: number; total: number }
   | { type: "ClipExtraction"; done: number; total: number; clip_name: string }
   | { type: "SliceGeneration"; done: number; total: number }
+  | { type: "ClipsReady"; clips: ClipSuggestion[] }
   | { type: "Log"; level: string; message: string }
   | { type: "PipelineDone" }
   | { type: "PipelineError"; message: string };
@@ -38,18 +42,28 @@ export function subscribeProgress(
 // Store-integrated SSE connection
 import {
   pipelineRunning,
+  hashProgress,
   audioProgress,
   transcriptionProgress,
   transcriptionLabel,
   analysisProgress,
   extractionProgress,
   currentStage,
+  clips,
+  activeTab,
   addLog,
 } from './stores';
+
+// Tab index for the Extract tab in App.svelte's tab array.
+const EXTRACT_TAB_INDEX = 1;
 
 export function connectProgress(): () => void {
   return subscribeProgress((event) => {
     switch (event.type) {
+      case 'Hashing':
+        currentStage.set('hashing');
+        hashProgress.set(event.percent);
+        break;
       case 'AudioExtraction':
         currentStage.set('audio');
         audioProgress.set(event.percent);
@@ -64,6 +78,7 @@ export function connectProgress(): () => void {
         transcriptionLabel.set(event.label);
         break;
       case 'Chunking':
+        currentStage.set('chunking');
         addLog('info', `Split transcript into ${event.chunk_count} chunks`);
         break;
       case 'Analysis':
@@ -77,6 +92,13 @@ export function connectProgress(): () => void {
       case 'SliceGeneration':
         currentStage.set('slices');
         addLog('info', `Slice generation: ${event.done}/${event.total}`);
+        break;
+      case 'ClipsReady':
+        clips.set(event.clips);
+        addLog('info', `Found ${event.clips.length} clip${event.clips.length === 1 ? '' : 's'}`);
+        if (event.clips.length > 0) {
+          activeTab.set(EXTRACT_TAB_INDEX);
+        }
         break;
       case 'Log':
         addLog(event.level, event.message);

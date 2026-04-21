@@ -3,7 +3,8 @@
   import ProgressBar from '../components/ProgressBar.svelte';
   import {
     mp4Path, pipelineRunning, currentStage, language,
-    audioProgress, transcriptionProgress, transcriptionLabel,
+    hashProgress, audioProgress, transcriptionProgress, transcriptionLabel,
+    analysisProgress,
     addLog, resetProgress, activeProfile,
   } from '../lib/stores';
   import { apiFetch } from '../lib/api';
@@ -75,13 +76,13 @@
     const track = audioTrack === -1 ? undefined : audioTrack;
 
     const body: Record<string, any> = {
-      mp4_path: $mp4Path,
+      source_path: $mp4Path,
       whisper_model: whisperModel,
       language: selectedLanguage,
       audio_track: track,
       top_n: maxClips,
       window_minutes: windowMinutes,
-      padding_minutes: paddingMinutes,
+      padding_seconds: paddingMinutes * 60,
       custom_prompts: prompts,
       output_dir: $mp4Path ? $mp4Path.replace(/[/\\][^/\\]+$/, '') : '',
     };
@@ -243,11 +244,21 @@
   <!-- Progress -->
   {#if $pipelineRunning}
     <div class="progress-section">
-      {#if $currentStage === 'audio'}
+      {#if $currentStage === 'hashing'}
+        <ProgressBar label="Hashing file" value={$hashProgress} />
+      {:else if $currentStage === 'audio'}
         <ProgressBar label="Extracting audio" value={$audioProgress} />
-      {/if}
-      {#if $currentStage === 'transcription'}
+      {:else if $currentStage === 'spikes'}
+        <ProgressBar label="Detecting volume spikes" value={0} indeterminate />
+      {:else if $currentStage === 'transcription'}
         <ProgressBar label={$transcriptionLabel || 'Transcribing'} value={$transcriptionProgress} />
+      {:else if $currentStage === 'chunking'}
+        <ProgressBar label="Chunking transcript" value={0} indeterminate />
+      {:else if $currentStage === 'analysis'}
+        <ProgressBar
+          label={`Analyzing chunks (${$analysisProgress.done}/${$analysisProgress.total})`}
+          value={$analysisProgress.total > 0 ? Math.round(($analysisProgress.done / $analysisProgress.total) * 100) : 0}
+        />
       {/if}
     </div>
   {/if}

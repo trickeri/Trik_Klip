@@ -31,8 +31,10 @@ pub struct ProviderInfo {
 
 fn default_anthropic_models() -> Vec<String> {
     [
+        "claude-opus-4-7",
         "claude-opus-4-6",
         "claude-sonnet-4-6",
+        "claude-haiku-4-5-20251001",
         "claude-3-5-sonnet-20241022",
         "claude-3-5-haiku-20241022",
         "claude-3-opus-20240229",
@@ -98,6 +100,7 @@ fn default_ollama_models() -> Vec<String> {
 
 fn default_claude_code_models() -> Vec<String> {
     [
+        "claude-opus-4-7",
         "claude-sonnet-4-6",
         "claude-opus-4-6",
         "claude-haiku-4-5-20251001",
@@ -422,11 +425,16 @@ pub async fn refresh_provider_models(
 // ---------------------------------------------------------------------------
 
 /// Construct a boxed `LlmProvider` for the given provider key.
+///
+/// `cancel_rx` is plumbed into providers that can respond to mid-call cancel
+/// (currently only Claude Code CLI, which spawns a subprocess that can be killed).
+/// HTTP-based providers ignore it for now.
 pub fn make_provider(
     provider: &str,
     api_key: &str,
     base_url: &str,
     client: Client,
+    cancel_rx: Option<crate::cancel::CancelRx>,
 ) -> anyhow::Result<Box<dyn LlmProvider>> {
     match provider {
         "anthropic" => Ok(Box::new(AnthropicProvider::new(
@@ -478,7 +486,11 @@ pub fn make_provider(
             } else {
                 Some(api_key.to_string())
             };
-            Ok(Box::new(ClaudeCliProvider::new(fallback, client)))
+            let mut provider = ClaudeCliProvider::new(fallback, client);
+            if let Some(rx) = cancel_rx {
+                provider = provider.with_cancel(rx);
+            }
+            Ok(Box::new(provider))
         }
 
         other => anyhow::bail!("Unknown provider: {}", other),

@@ -138,7 +138,27 @@
       "Bash(cmd //c build_vulkan.bat)",
       "Bash(./whisper-cli.exe -m \"D:/Videos/Streams/Clips/whisper_benchmark/whisper_cpp/models/ggml-base.bin\" -d 30000 -l en \"D:/Videos/Streams/Clips/whisper_benchmark/audio_16khz.wav\")",
       "Bash(mkdir -p \"D:/Videos/Streams/Clips/whisper_benchmark/whisper_cpp_vulkan_output\")",
-      "Bash(time ./whisper-cli.exe -m D:/Videos/Streams/Clips/whisper_benchmark/whisper_cpp/models/ggml-base.bin -l en -t 8 -oj -of D:/Videos/Streams/Clips/whisper_benchmark/whisper_cpp_vulkan_output/transcript D:/Videos/Streams/Clips/whisper_benchmark/audio_16khz.wav)"
+      "Bash(time ./whisper-cli.exe -m D:/Videos/Streams/Clips/whisper_benchmark/whisper_cpp/models/ggml-base.bin -l en -t 8 -oj -of D:/Videos/Streams/Clips/whisper_benchmark/whisper_cpp_vulkan_output/transcript D:/Videos/Streams/Clips/whisper_benchmark/audio_16khz.wav)",
+      "Bash(powershell.exe:*)",
+      "Bash(export PATH=\"$HOME/.cargo/bin:$PATH\")",
+      "Bash(rustc --version)",
+      "Bash(cmd //c \"mklink /D src-tauri\\\\\\\\resources target\\\\\\\\release\\\\\\\\resources\")",
+      "Bash(cmd //c \"mklink /J src-tauri\\\\\\\\resources target\\\\\\\\release\\\\\\\\resources\")",
+      "Bash(gh auth:*)",
+      "Bash(npm run:*)",
+      "Bash(gh run:*)",
+      "Bash(cargo check *)",
+      "Bash(cargo build *)",
+      "Bash(unzip -l dist_python/Trik_Klip_Qt/_internal/base_library.zip)",
+      "Bash(pyinstaller *)",
+      "Bash(py -0)",
+      "Read(//c/Users/Troy/AppData/Roaming/Python/Python310/Scripts/**)",
+      "Bash(py -3.11 -m PyInstaller --version)",
+      "Bash(py -3.9 -m PyInstaller --version)",
+      "Read(//c/Users/Troy/AppData/Roaming/Python/**)",
+      "Read(//c/ProgramData/anaconda3/**)",
+      "Bash(py *)",
+      "Bash(build_env/Scripts/python.exe *)"
     ]
   }
 }

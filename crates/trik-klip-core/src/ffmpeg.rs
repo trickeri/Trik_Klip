@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use tokio::process::Command;
 use tracing::{debug, error, info};
 
+use crate::cancel::{wait_cancelled, CancelRx};
 use crate::models::ProgressEvent;
 
 /// Windows CREATE_NO_WINDOW flag to suppress console popups.
@@ -68,6 +69,7 @@ pub async fn extract_audio(
     output_wav: &str,
     audio_track: Option<u32>,
     progress_tx: Option<tokio::sync::broadcast::Sender<ProgressEvent>>,
+    mut cancel_rx: Option<CancelRx>,
 ) -> Result<()> {
     // If progress reporting is requested, get the total duration first.
     let total_duration_us: Option<f64> = if progress_tx.is_some() {
@@ -157,7 +159,14 @@ pub async fn extract_audio(
             }
         });
 
-        let status = child.wait().await.context("ffmpeg audio extraction failed")?;
+        let status = tokio::select! {
+            status = child.wait() => status.context("ffmpeg audio extraction failed")?,
+            _ = wait_cancelled(cancel_rx.as_mut()) => {
+                let _ = child.kill().await;
+                let _ = reader_handle.await;
+                anyhow::bail!("Pipeline cancelled by user");
+            }
+        };
         // Wait for the reader to finish draining.
         let _ = reader_handle.await;
 
@@ -165,12 +174,24 @@ pub async fn extract_audio(
             anyhow::bail!("ffmpeg audio extraction exited with status {}", status);
         }
     } else {
-        // No progress — just run to completion.
-        let output = cmd.output().await.context("failed to run ffmpeg for audio extraction")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        // No progress — spawn, race wait() against cancel, kill on cancel.
+        let mut child = cmd.spawn().context("failed to spawn ffmpeg for audio extraction")?;
+        let status = tokio::select! {
+            s = child.wait() => s.context("failed to wait on ffmpeg for audio extraction")?,
+            _ = wait_cancelled(cancel_rx.as_mut()) => {
+                let _ = child.kill().await;
+                anyhow::bail!("Pipeline cancelled by user");
+            }
+        };
+        if !status.success() {
+            let mut stderr_bytes = Vec::new();
+            if let Some(mut err) = child.stderr.take() {
+                use tokio::io::AsyncReadExt;
+                let _ = err.read_to_end(&mut stderr_bytes).await;
+            }
+            let stderr = String::from_utf8_lossy(&stderr_bytes);
             error!(%stderr, "ffmpeg audio extraction failed");
-            anyhow::bail!("ffmpeg audio extraction exited with status {}: {}", output.status, stderr);
+            anyhow::bail!("ffmpeg audio extraction exited with status {}: {}", status, stderr);
         }
     }
 
@@ -185,6 +206,7 @@ pub async fn extract_clip(
     output_path: &str,
     clip_start: f64,
     duration: f64,
+    mut cancel_rx: Option<CancelRx>,
 ) -> Result<()> {
     info!(
         mp4_path,
@@ -209,17 +231,29 @@ pub async fn extract_clip(
     .stderr(std::process::Stdio::piped());
     apply_creation_flags(&mut cmd);
 
-    let output = cmd
-        .output()
-        .await
-        .context("failed to run ffmpeg for clip extraction")?;
+    let mut child = cmd
+        .spawn()
+        .context("failed to spawn ffmpeg for clip extraction")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let status = tokio::select! {
+        s = child.wait() => s.context("failed to wait on ffmpeg for clip extraction")?,
+        _ = wait_cancelled(cancel_rx.as_mut()) => {
+            let _ = child.kill().await;
+            anyhow::bail!("Pipeline cancelled by user");
+        }
+    };
+
+    if !status.success() {
+        let mut stderr_bytes = Vec::new();
+        if let Some(mut err) = child.stderr.take() {
+            use tokio::io::AsyncReadExt;
+            let _ = err.read_to_end(&mut stderr_bytes).await;
+        }
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
         error!(%stderr, "ffmpeg clip extraction failed");
         anyhow::bail!(
             "ffmpeg clip extraction exited with status {}: {}",
-            output.status,
+            status,
             stderr
         );
     }
@@ -238,6 +272,7 @@ pub async fn extract_slice(
     output_path: &str,
     seek_seconds: f64,
     duration: f64,
+    mut cancel_rx: Option<CancelRx>,
 ) -> Result<()> {
     info!(
         clip_mp4,
@@ -262,17 +297,29 @@ pub async fn extract_slice(
     .stderr(std::process::Stdio::piped());
     apply_creation_flags(&mut cmd);
 
-    let output = cmd
-        .output()
-        .await
-        .context("failed to run ffmpeg for slice extraction")?;
+    let mut child = cmd
+        .spawn()
+        .context("failed to spawn ffmpeg for slice extraction")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let status = tokio::select! {
+        s = child.wait() => s.context("failed to wait on ffmpeg for slice extraction")?,
+        _ = wait_cancelled(cancel_rx.as_mut()) => {
+            let _ = child.kill().await;
+            anyhow::bail!("Pipeline cancelled by user");
+        }
+    };
+
+    if !status.success() {
+        let mut stderr_bytes = Vec::new();
+        if let Some(mut err) = child.stderr.take() {
+            use tokio::io::AsyncReadExt;
+            let _ = err.read_to_end(&mut stderr_bytes).await;
+        }
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
         error!(%stderr, "ffmpeg slice extraction failed");
         anyhow::bail!(
             "ffmpeg slice extraction exited with status {}: {}",
-            output.status,
+            status,
             stderr
         );
     }
