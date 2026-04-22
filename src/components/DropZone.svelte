@@ -52,8 +52,27 @@
     if (unlisten) unlisten();
   });
 
-  function handleClick() {
-    if (!disabled) {
+  async function handleClick() {
+    if (disabled) return;
+    // Use Tauri's dialog plugin instead of an HTML <input type="file">.
+    // In a Tauri webview, File.path is undefined for security reasons, so
+    // the HTML path only gives us the bare filename — which the backend
+    // can't actually open. The dialog plugin returns absolute paths.
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const ext = accept.replace(/^\./, '');
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: ext ? [{ name: ext.toUpperCase(), extensions: [ext] }] : undefined,
+      });
+      if (typeof selected === 'string' && selected) {
+        filePath = selected;
+        onSelect(selected);
+      }
+    } catch {
+      // If the dialog plugin isn't available for some reason, fall back
+      // to the legacy input so at least something happens.
       fileInput?.click();
     }
   }
