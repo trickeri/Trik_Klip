@@ -21,6 +21,10 @@
   let refreshingModels = false;
   let modelsError = '';
 
+  // Profile connection test state
+  let testing = false;
+  let testResult: { success: boolean; message: string } | null = null;
+
   // Language
   let selectedLanguage = 'en';
   language.subscribe(v => { selectedLanguage = v; });
@@ -100,6 +104,7 @@
 
   function selectProfile(p: ProviderProfile) {
     selectedProfileId = p.id;
+    testResult = null;
     editName = p.name;
     editProvider = p.provider;
     editModel = p.model;
@@ -174,6 +179,48 @@
     }
   }
 
+  async function testProfile() {
+    if (!editProvider) {
+      testResult = { success: false, message: 'Select a provider first' };
+      return;
+    }
+    testing = true;
+    testResult = null;
+    try {
+      const body = {
+        provider: editProvider,
+        model: editModel,
+        api_key: editApiKey,
+        base_url: editBaseUrl,
+      };
+      const res = await apiFetch<{
+        success: boolean;
+        provider?: string;
+        model?: string;
+        response?: string;
+        error?: string;
+      }>('/providers/test', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      if (res.success) {
+        const preview = (res.response || '').trim().slice(0, 120);
+        testResult = {
+          success: true,
+          message: preview
+            ? `OK — ${res.provider}/${res.model} replied: "${preview}"`
+            : `OK — ${res.provider}/${res.model} responded`,
+        };
+      } else {
+        testResult = { success: false, message: res.error || 'Unknown error' };
+      }
+    } catch (e: any) {
+      testResult = { success: false, message: e.message || String(e) };
+    } finally {
+      testing = false;
+    }
+  }
+
   async function deleteProfile() {
     if (!selectedProfileId) return;
     try {
@@ -191,6 +238,7 @@
   function handleProviderChange() {
     loadModels(editProvider);
     editModel = '';
+    testResult = null;
   }
 
   function providerLabel(p: string): string {
@@ -203,6 +251,138 @@
       claude_code: 'Claude Code',
     };
     return labels[p] || p;
+  }
+
+  // ── Premiere settings ──────────────────────────────────────────────────
+  interface BannerEntry {
+    label: string;
+    path: string;
+    position: [number, number] | null;
+  }
+  interface TrackPosition {
+    label: string;
+    track_index: number;
+    x: number;
+    y: number;
+  }
+  interface PremiereConfig {
+    banners: BannerEntry[];
+    positions: TrackPosition[];
+  }
+
+  let premiereOpen = false;
+  let premiereConfig: PremiereConfig = { banners: [], positions: [] };
+  let premiereLoaded = false;
+  let premiereSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  onMount(async () => {
+    try {
+      premiereConfig = await apiFetch<PremiereConfig>('/settings/premiere');
+      premiereLoaded = true;
+    } catch (e: any) {
+      addLog('error', `Failed to load premiere settings: ${e.message}`);
+    }
+  });
+
+  function schedulePremiereSave() {
+    if (!premiereLoaded) return;
+    if (premiereSaveTimer) clearTimeout(premiereSaveTimer);
+    premiereSaveTimer = setTimeout(savePremiereConfig, 400);
+  }
+
+  async function savePremiereConfig() {
+    try {
+      await apiFetch('/settings/premiere', {
+        method: 'PUT',
+        body: JSON.stringify(premiereConfig),
+      });
+    } catch (e: any) {
+      addLog('error', `Save premiere settings failed: ${e.message}`);
+    }
+  }
+
+  async function browseBannerPath(idx: number) {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Image', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+      });
+      if (typeof selected === 'string' && selected) {
+        premiereConfig.banners[idx].path = selected;
+        premiereConfig = premiereConfig;
+        schedulePremiereSave();
+      }
+    } catch (e: any) {
+      addLog('error', `File picker failed: ${e.message || e}`);
+    }
+  }
+
+  function addBanner() {
+    premiereConfig.banners = [
+      ...premiereConfig.banners,
+      { label: 'Custom banner', path: '', position: null },
+    ];
+    schedulePremiereSave();
+  }
+
+  function toggleBannerPosition(idx: number, enabled: boolean) {
+    premiereConfig.banners[idx].position = enabled ? [0, 0] : null;
+    premiereConfig = premiereConfig;
+    schedulePremiereSave();
+  }
+
+  function updateBannerPosition(idx: number, axis: 0 | 1, value: number) {
+    const pos = premiereConfig.banners[idx].position;
+    if (pos) {
+      pos[axis] = value;
+      premiereConfig = premiereConfig;
+      schedulePremiereSave();
+    }
+  }
+
+  function removeBanner(idx: number) {
+    premiereConfig.banners = premiereConfig.banners.filter((_, i) => i !== idx);
+    schedulePremiereSave();
+  }
+
+  function addPosition() {
+    const nextTrack = premiereConfig.positions.length > 0
+      ? Math.max(...premiereConfig.positions.map(p => p.track_index)) + 1
+      : 0;
+    premiereConfig.positions = [
+      ...premiereConfig.positions,
+      { label: 'New override', track_index: nextTrack, x: 0, y: 0 },
+    ];
+    schedulePremiereSave();
+  }
+
+  function removePosition(idx: number) {
+    premiereConfig.positions = premiereConfig.positions.filter((_, i) => i !== idx);
+    schedulePremiereSave();
+  }
+
+  function handleBannerDrop(idx: number, e: DragEvent) {
+    e.preventDefault();
+    // Tauri's webview drag-drop goes through window events (DropZone uses
+    // them for the mp4), but the native HTML drop also fires with a files
+    // list in the DataTransfer. In Tauri 2 the File objects don't expose a
+    // path — fall back to the built-in drag-drop event via the Tauri window
+    // listener. For a simpler UX here, just open the native picker if a
+    // file is dropped.
+    const items = e.dataTransfer?.files;
+    if (items && items.length > 0) {
+      const f: any = items[0];
+      if (f.path) {
+        premiereConfig.banners[idx].path = f.path;
+        premiereConfig = premiereConfig;
+        schedulePremiereSave();
+      } else {
+        // No path available — nudge the user to use Browse instead.
+        addLog('warn', 'Drag-drop gave no file path — use Browse instead.');
+      }
+    }
   }
 </script>
 
@@ -313,12 +493,165 @@
         <button class="btn btn-primary btn-small" on:click={saveProfile} disabled={!editName || !editProvider}>
           {creating ? 'Save Profile' : 'Save Profile'}
         </button>
+        <button class="btn btn-secondary btn-small" on:click={testProfile} disabled={!editProvider || testing}>
+          {testing ? 'Testing...' : 'Test'}
+        </button>
         {#if !creating}
           <button class="btn btn-danger btn-small" on:click={deleteProfile}>Delete Profile</button>
         {/if}
       </div>
+
+      {#if testResult}
+        <div class="test-result" class:ok={testResult.success} class:fail={!testResult.success}>
+          {testResult.success ? '✓' : '✗'} {testResult.message}
+        </div>
+      {/if}
     {:else}
       <p class="dim-text">Select a profile above or create a new one.</p>
+    {/if}
+  </div>
+
+  <!-- Premiere Prompt Settings Card (collapsible) -->
+  <div class="card">
+    <button
+      class="collapse-header"
+      type="button"
+      on:click={() => (premiereOpen = !premiereOpen)}
+      aria-expanded={premiereOpen}
+    >
+      <span class="chev">{premiereOpen ? '▼' : '▶'}</span>
+      <h4 class="card-title">Premiere Prompt Settings</h4>
+    </button>
+
+    {#if premiereOpen}
+      <div class="premiere-body">
+        <p class="dim-text">
+          Customize what goes into the Premiere setup prompt so it matches
+          your machine instead of hard-coded paths.
+        </p>
+
+        <!-- Banners -->
+        <div class="sub-section">
+          <div class="sub-header">
+            <span class="sub-title">Mandatory banner imports</span>
+            <button class="btn btn-small btn-secondary" on:click={addBanner}>+ Add banner</button>
+          </div>
+          <p class="hint-text">
+            These are imported for every clip and placed on the timeline
+            after the visual aids. Order determines track index (first → Video 5, second → Video 6, …).
+          </p>
+          {#each premiereConfig.banners as banner, i}
+            <div
+              class="banner-row"
+              on:dragover|preventDefault
+              on:drop={(e) => handleBannerDrop(i, e)}
+              role="region"
+              aria-label="Banner {i + 1}"
+            >
+              <input
+                type="text"
+                class="banner-label"
+                bind:value={banner.label}
+                placeholder="Label (e.g. Twitch banner)"
+                on:input={schedulePremiereSave}
+              />
+              <input
+                type="text"
+                class="banner-path"
+                bind:value={banner.path}
+                placeholder="Drop image here or click Browse"
+                on:input={schedulePremiereSave}
+              />
+              <button class="btn btn-small btn-secondary" on:click={() => browseBannerPath(i)}>Browse</button>
+              <button class="btn-remove" title="Remove" on:click={() => removeBanner(i)}>×</button>
+            </div>
+            <div class="banner-pos-row">
+              <label class="checkbox-inline">
+                <input
+                  type="checkbox"
+                  checked={banner.position !== null}
+                  on:change={(e) => toggleBannerPosition(i, (e.target as HTMLInputElement).checked)}
+                />
+                Position reminder
+              </label>
+              {#if banner.position}
+                <input
+                  type="number"
+                  class="pos-xy"
+                  value={banner.position[0]}
+                  on:input={(e) => updateBannerPosition(i, 0, parseFloat((e.target as HTMLInputElement).value) || 0)}
+                  placeholder="x"
+                  title="x position"
+                />
+                <input
+                  type="number"
+                  class="pos-xy"
+                  value={banner.position[1]}
+                  on:input={(e) => updateBannerPosition(i, 1, parseFloat((e.target as HTMLInputElement).value) || 0)}
+                  placeholder="y"
+                  title="y position"
+                />
+              {:else}
+                <span class="hint-text">(will say "position as needed" in the prompt)</span>
+              {/if}
+            </div>
+          {/each}
+          {#if premiereConfig.banners.length === 0}
+            <p class="dim-text">No banners configured. Click "+ Add banner" to add one.</p>
+          {/if}
+        </div>
+
+        <!-- Position overrides -->
+        <div class="sub-section">
+          <div class="sub-header">
+            <span class="sub-title">Manual position overrides</span>
+            <button class="btn btn-small btn-secondary" on:click={addPosition}>+ Add position</button>
+          </div>
+          <p class="hint-text">
+            These appear at the end of the prompt as reminders to set
+            manually in Effect Controls (UXP API bug workaround).
+          </p>
+          {#each premiereConfig.positions as pos, i}
+            <div class="pos-row">
+              <input
+                type="number"
+                class="pos-track"
+                bind:value={pos.track_index}
+                on:input={schedulePremiereSave}
+                min={0}
+                title="Video track index"
+              />
+              <input
+                type="text"
+                class="pos-label"
+                bind:value={pos.label}
+                placeholder="Label (e.g. Main clip (scale 198))"
+                on:input={schedulePremiereSave}
+              />
+              <input
+                type="number"
+                class="pos-xy"
+                bind:value={pos.x}
+                on:input={schedulePremiereSave}
+                placeholder="x"
+                title="x position"
+              />
+              <input
+                type="number"
+                class="pos-xy"
+                bind:value={pos.y}
+                on:input={schedulePremiereSave}
+                placeholder="y"
+                title="y position"
+              />
+              <button class="btn-remove" title="Remove" on:click={() => removePosition(i)}>×</button>
+            </div>
+          {/each}
+          {#if premiereConfig.positions.length === 0}
+            <p class="dim-text">No position overrides.</p>
+          {/if}
+        </div>
+      </div>
     {/if}
   </div>
 </div>
@@ -414,7 +747,7 @@
   }
 
   /* Inputs */
-  select, input[type="text"], input[type="password"] {
+  select, input[type="text"], input[type="password"], input[type="number"] {
     padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -482,5 +815,204 @@
     padding: 4px 12px;
     font-size: 12px;
     font-weight: 500;
+  }
+
+  .test-result {
+    margin-top: 6px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    line-height: 1.4;
+    word-break: break-word;
+  }
+
+  .test-result.ok {
+    background: color-mix(in srgb, var(--success, #2ecc71) 15%, transparent);
+    border: 1px solid var(--success, #2ecc71);
+    color: var(--text);
+  }
+
+  .test-result.fail {
+    background: color-mix(in srgb, var(--error, #e53e3e) 15%, transparent);
+    border: 1px solid var(--error, #e53e3e);
+    color: var(--text);
+  }
+
+  /* ── Premiere settings ─────────────────────────────────────────────── */
+
+  .collapse-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: transparent;
+    border: none;
+    color: var(--text);
+    cursor: pointer;
+    padding: 0;
+    text-align: left;
+    width: 100%;
+  }
+
+  .collapse-header:focus {
+    outline: none;
+  }
+
+  .chev {
+    color: var(--dim);
+    font-size: 11px;
+    width: 14px;
+    text-align: center;
+  }
+
+  .premiere-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 6px;
+  }
+
+  .sub-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--entry-bg);
+  }
+
+  .sub-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .sub-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .hint-text {
+    font-size: 11px;
+    color: var(--dim);
+    margin: 0;
+    line-height: 1.4;
+  }
+
+  .banner-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .banner-pos-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-left: 148px; /* align under the path input */
+    margin-bottom: 4px;
+  }
+
+  /* Explicit dark theme for inputs inside the Premiere settings body —
+     browser defaults for type="number" and some shadow-DOM quirks otherwise
+     render them white. */
+  .premiere-body input[type="text"],
+  .premiere-body input[type="number"] {
+    background: var(--entry-bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 13px;
+    outline: none;
+    font-family: inherit;
+  }
+
+  .premiere-body input[type="text"]:focus,
+  .premiere-body input[type="number"]:focus {
+    border-color: var(--accent);
+  }
+
+  /* Hide the browser's default number spinner buttons — they look native
+     and don't match the theme. */
+  .premiere-body input[type="number"]::-webkit-inner-spin-button,
+  .premiere-body input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  .premiere-body input[type="number"] {
+    -moz-appearance: textfield;
+  }
+
+  .checkbox-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--dim);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .checkbox-inline input[type="checkbox"] {
+    accent-color: var(--accent);
+    width: 13px;
+    height: 13px;
+  }
+
+  .banner-label {
+    flex: 0 0 140px;
+  }
+
+  .banner-path {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .pos-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .pos-track {
+    width: 64px;
+    flex: 0 0 auto;
+    text-align: center;
+  }
+
+  .pos-label {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .pos-xy {
+    width: 88px;
+    flex: 0 0 auto;
+    text-align: right;
+  }
+
+  .btn-remove {
+    background: transparent;
+    border: none;
+    color: var(--dim);
+    font-size: 18px;
+    line-height: 1;
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    cursor: pointer;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+  }
+
+  .btn-remove:hover {
+    background: color-mix(in srgb, var(--error, #e53e3e) 20%, transparent);
+    color: var(--error, #e53e3e);
   }
 </style>

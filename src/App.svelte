@@ -187,18 +187,34 @@
       </div>
     {:else if !mounted}
       <div class="placeholder">Loading...</div>
-    {:else if activeTab === 0 && Transcribe}
-      <Transcribe />
-    {:else if activeTab === 1 && Extract}
-      <Extract />
-    {:else if activeTab === 2 && Slice}
-      <Slice />
-    {:else if activeTab === 3 && Settings}
-      <Settings />
-    {:else if activeTab === 4 && About}
-      <About />
     {:else}
-      <div class="placeholder">Loading tab...</div>
+      <!-- Keep all tabs mounted and toggle visibility with CSS so local
+           component state (run mode, form fields) persists across tab switches. -->
+      {#if Transcribe}
+        <div class="tab-pane" style:display={activeTab === 0 ? 'contents' : 'none'}>
+          <Transcribe />
+        </div>
+      {/if}
+      {#if Extract}
+        <div class="tab-pane" style:display={activeTab === 1 ? 'contents' : 'none'}>
+          <Extract />
+        </div>
+      {/if}
+      {#if Slice}
+        <div class="tab-pane" style:display={activeTab === 2 ? 'contents' : 'none'}>
+          <Slice />
+        </div>
+      {/if}
+      {#if Settings}
+        <div class="tab-pane" style:display={activeTab === 3 ? 'contents' : 'none'}>
+          <Settings />
+        </div>
+      {/if}
+      {#if About}
+        <div class="tab-pane" style:display={activeTab === 4 ? 'contents' : 'none'}>
+          <About />
+        </div>
+      {/if}
     {/if}
   </main>
 

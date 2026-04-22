@@ -1,6 +1,7 @@
 pub mod config;
 pub mod error;
 pub mod pipeline;
+pub mod premiere;
 pub mod routes;
 
 use std::collections::HashMap;

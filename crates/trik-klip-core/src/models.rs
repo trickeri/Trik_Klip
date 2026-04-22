@@ -48,7 +48,15 @@ pub enum ProgressEvent {
     Analysis { done: usize, total: usize },
     ClipExtraction { done: usize, total: usize, clip_name: String },
     SliceGeneration { done: usize, total: usize },
-    ClipsReady { clips: Vec<ClipSuggestion> },
+    VisualAids { done: usize, total: usize },
+    ClipsReady {
+        clips: Vec<ClipSuggestion>,
+        /// Full transcript segments — forwarded to the client so it can
+        /// include them in a later Extract request (for per-clip transcript
+        /// slicing) without the backend re-hashing the source file.
+        #[serde(default)]
+        segments: Vec<TranscriptSegment>,
+    },
     Log { level: String, message: String },
     PipelineDone,
     PipelineError { message: String },

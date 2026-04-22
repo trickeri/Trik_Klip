@@ -158,7 +158,12 @@
       "Read(//c/Users/Troy/AppData/Roaming/Python/**)",
       "Read(//c/ProgramData/anaconda3/**)",
       "Bash(py *)",
-      "Bash(build_env/Scripts/python.exe *)"
+      "Bash(build_env/Scripts/python.exe *)",
+      "Bash(cargo add *)",
+      "Bash(npm install *)",
+      "Bash(awk *)",
+      "Bash(sed -i '311,478d' src/server/routes/mod.rs)",
+      "Bash(sed -n '308,315p' src/server/routes/mod.rs)"
     ]
   }
 }

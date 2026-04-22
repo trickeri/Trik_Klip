@@ -71,11 +71,11 @@
     align-items: center;
     color: var(--accent);
     text-decoration: none;
-    transition: opacity 0.15s;
+    transition: color 0.15s;
   }
 
   .social-links a:hover {
-    opacity: 0.7;
+    color: #ffffff;
   }
 
   .social-links svg {

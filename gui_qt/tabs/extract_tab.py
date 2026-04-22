@@ -151,8 +151,9 @@ class ExtractTab(QWidget):
         """Auto-fill output dir based on video path."""
         if path:
             from pathlib import Path
+            # Match the Transcribe tab convention: <mp4_parent>/Clips/<stem>/.
             self._output_dir.setText(
-                str(Path(path).parent / (Path(path).stem + "_clips")))
+                str(Path(path).parent / "Clips" / Path(path).stem))
 
     def _set_all(self, checked: bool):
         for row in self._rows:

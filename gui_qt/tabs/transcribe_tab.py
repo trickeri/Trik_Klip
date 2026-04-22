@@ -135,11 +135,13 @@ class TranscribeTab(QWidget):
 
         path_layout.addWidget(_section_label("File Paths"))
 
-        # Transcript load
-        t_row = QHBoxLayout()
+        # Transcript load (shown only in Analyze Only mode)
+        self._load_row = QWidget()
+        t_row = QHBoxLayout(self._load_row)
+        t_row.setContentsMargins(0, 0, 0, 0)
         t_row.addWidget(QLabel("Load Transcript"))
         self.transcript_path = QLineEdit()
-        self.transcript_path.setPlaceholderText("(optional) existing transcript JSON")
+        self.transcript_path.setPlaceholderText("existing transcript JSON")
         t_row.addWidget(self.transcript_path, 1)
         t_browse = QPushButton("Browse")
         t_browse.setProperty("cssClass", "secondary")
@@ -147,23 +149,27 @@ class TranscribeTab(QWidget):
         t_browse.setFixedHeight(28)
         t_browse.clicked.connect(self._browse_transcript)
         t_row.addWidget(t_browse)
-        path_layout.addLayout(t_row)
+        path_layout.addWidget(self._load_row)
 
-        # Save transcript
-        s_row = QHBoxLayout()
+        # Save transcript (hidden in Analyze Only mode)
+        self._save_row = QWidget()
+        s_row = QHBoxLayout(self._save_row)
+        s_row.setContentsMargins(0, 0, 0, 0)
         s_row.addWidget(QLabel("Save Transcript"))
         self.save_transcript_path = QLineEdit()
         self.save_transcript_path.setPlaceholderText("(auto-filled from video)")
         s_row.addWidget(self.save_transcript_path, 1)
-        path_layout.addLayout(s_row)
+        path_layout.addWidget(self._save_row)
 
-        # Output JSON
-        o_row = QHBoxLayout()
+        # Output JSON (hidden in Analyze Only mode)
+        self._output_row = QWidget()
+        o_row = QHBoxLayout(self._output_row)
+        o_row.setContentsMargins(0, 0, 0, 0)
         o_row.addWidget(QLabel("Output JSON"))
         self.output_json_path = QLineEdit()
         self.output_json_path.setPlaceholderText("(auto-filled from video)")
         o_row.addWidget(self.output_json_path, 1)
-        path_layout.addLayout(o_row)
+        path_layout.addWidget(self._output_row)
 
         # ── Run mode ─────────────────────────────────────────────────────
         mode_card, mode_layout = _card()
@@ -186,7 +192,21 @@ class TranscribeTab(QWidget):
         mode_row.addWidget(self.mode_analyze)
         mode_row.addStretch()
 
+        # Show/hide path rows based on run mode.
+        self._mode_group.idToggled.connect(self._update_path_visibility)
+        self._update_path_visibility(0, True)
+
         layout.addStretch()
+
+    def _update_path_visibility(self, mode_id: int, checked: bool = True):
+        # idToggled fires for both the unchecked and the newly-checked button;
+        # only react to the one that just turned on.
+        if not checked:
+            return
+        analyze_only = (mode_id == 2)
+        self._load_row.setVisible(analyze_only)
+        self._save_row.setVisible(not analyze_only)
+        self._output_row.setVisible(not analyze_only)
 
     def get_params(self) -> dict:
         """Collect all parameters into a dict for the worker."""
@@ -208,11 +228,12 @@ class TranscribeTab(QWidget):
 
     def _on_file_selected(self, path: str):
         stem = Path(path).stem
-        parent = str(Path(path).parent)
+        # Everything for this video goes under <mp4_parent>/Clips/<stem>/.
+        base_dir = str(Path(path).parent / "Clips" / stem)
         if not self.save_transcript_path.text():
-            self.save_transcript_path.setText(f"{parent}/{stem}_transcript.json")
+            self.save_transcript_path.setText(f"{base_dir}/{stem}_transcript.json")
         if not self.output_json_path.text():
-            self.output_json_path.setText(f"{parent}/{stem}_clips.json")
+            self.output_json_path.setText(f"{base_dir}/{stem}_clips.json")
 
     def _browse_transcript(self):
         path, _ = QFileDialog.getOpenFileName(

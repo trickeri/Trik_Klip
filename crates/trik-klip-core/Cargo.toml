@@ -20,3 +20,4 @@ sha2 = "0.10"
 hex = "0.4"
 regex = "1"
 async-trait = "0.1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }

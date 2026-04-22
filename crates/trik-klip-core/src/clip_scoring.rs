@@ -74,31 +74,16 @@ async fn analyze_chunk(
     };
 
     let cleaned = strip_fences(&response.text);
-    let response_preview: String = cleaned.chars().take(250).collect();
-    info!(
-        "LLM response for chunk at {} ({} chars): {:?}",
-        fmt_time(chunk.window_start),
-        cleaned.len(),
-        response_preview,
-    );
 
     match serde_json::from_str::<ChunkAnalysis>(cleaned) {
-        Ok(analysis) => {
-            info!(
-                "Parsed chunk at {}: has_clip={}, score={}, title={:?}",
-                fmt_time(chunk.window_start),
-                analysis.has_clip,
-                analysis.virality_score,
-                analysis.title,
-            );
-            Some(analysis)
-        }
+        Ok(analysis) => Some(analysis),
         Err(e) => {
+            let preview: String = cleaned.chars().take(200).collect();
             warn!(
                 "Could not parse LLM response for chunk at {}: {}. Preview: {:?}",
                 fmt_time(chunk.window_start),
                 e,
-                response_preview,
+                preview,
             );
             None
         }

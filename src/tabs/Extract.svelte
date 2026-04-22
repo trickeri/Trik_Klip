@@ -2,14 +2,26 @@
   import ProgressBar from '../components/ProgressBar.svelte';
   import ClipCard from '../components/ClipCard.svelte';
   import {
-    mp4Path, outputDir, clips, pipelineRunning, currentStage,
+    mp4Path, outputDir, clips, transcriptSegments, pipelineRunning, currentStage,
     extractionProgress,
     addLog, resetProgress,
   } from '../lib/stores';
   import { apiFetch } from '../lib/api';
 
   let selectedClips = new Set<number>();
-  let outDir = './clips';
+  let outDir = '';
+
+  // Keep outDir in sync with the shared outputDir store (set by Transcribe
+  // based on the selected video). Falls back to <mp4_parent>/Clips/<stem>/
+  // if we see an mp4Path but the store hasn't been populated yet.
+  outputDir.subscribe(v => { if (v) outDir = v; });
+  mp4Path.subscribe(p => {
+    if (p && !outDir) {
+      const dir = p.replace(/[/\\][^/\\]+$/, '');
+      const stem = p.replace(/^.*[/\\]/, '').replace(/\.[^.]+$/, '');
+      outDir = `${dir}/Clips/${stem}/${stem}_clips`;
+    }
+  });
 
   // Select all clips by default when clips update
   clips.subscribe(c => {
@@ -70,6 +82,9 @@
           source_path: $mp4Path,
           clips: selected,
           output_dir: $outputDir || outDir || undefined,
+          // Forwarding segments lets the backend write per-clip transcript
+          // slices without re-hashing the multi-GB source file.
+          segments: $transcriptSegments,
         }),
       });
     } catch (e: any) {

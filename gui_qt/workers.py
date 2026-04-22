@@ -38,6 +38,21 @@ class GuiConsole:
         # shadow any of the explicit methods below.
         return getattr(self._fallback, name)
 
+    # Dunder methods bypass __getattr__ and must be defined explicitly.
+    # rich's Progress/Live uses `with console:` and other protocols during
+    # setup, so we delegate them to the fallback console.
+    def __enter__(self):
+        return self._fallback.__enter__()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self._fallback.__exit__(exc_type, exc_val, exc_tb)
+
+    def __len__(self):
+        return len(self._fallback)
+
+    def __bool__(self):
+        return True
+
     def _strip(self, text: str) -> str:
         return self._TAG_RE.sub("", str(text))
 

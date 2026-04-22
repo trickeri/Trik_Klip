@@ -12,6 +12,8 @@ export const transcriptionProgress = writable(0);
 export const transcriptionLabel = writable('');
 export const analysisProgress = writable({ done: 0, total: 0 });
 export const extractionProgress = writable({ done: 0, total: 0, clip_name: '' });
+export const sliceProgress = writable({ done: 0, total: 0 });
+export const visualProgress = writable({ done: 0, total: 0 });
 
 // Active tab — lets non-UI modules request tab switches (e.g. SSE → Extract on pipeline done).
 export const activeTab = writable(0);
@@ -46,5 +48,7 @@ export function resetProgress() {
     transcriptionLabel.set('');
     analysisProgress.set({ done: 0, total: 0 });
     extractionProgress.set({ done: 0, total: 0, clip_name: '' });
+    sliceProgress.set({ done: 0, total: 0 });
+    visualProgress.set({ done: 0, total: 0 });
     currentStage.set('');
 }

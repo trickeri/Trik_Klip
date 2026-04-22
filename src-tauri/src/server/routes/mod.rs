@@ -40,12 +40,19 @@ pub fn build_routes() -> Router<Arc<AppState>> {
         .route("/api/pipeline/analyze", post(pipeline_analyze))
         .route("/api/pipeline/extract", post(pipeline_extract))
         .route("/api/pipeline/slices", post(pipeline_slices))
+        .route("/api/slices/clips", get(list_clip_folders))
+        .route("/api/slices/premiere-prompt", post(write_premiere_prompt))
+        .route(
+            "/api/settings/premiere",
+            get(get_premiere_settings).put(put_premiere_settings),
+        )
         .route("/api/pipeline/cancel", post(pipeline_cancel))
         .route("/api/pipeline/status", get(pipeline_status))
         .route("/api/pipeline/progress", get(pipeline_progress_sse))
         // Providers
         .route("/api/providers", get(list_providers_handler))
         .route("/api/providers/{name}/models", get(provider_models))
+        .route("/api/providers/test", post(test_provider))
         // Profiles
         .route("/api/profiles", get(list_profiles).post(create_profile))
         .route(
@@ -164,6 +171,198 @@ async fn pipeline_slices(
     });
 
     Ok((StatusCode::ACCEPTED, Json(json!({"status": "started"}))))
+}
+
+#[derive(Deserialize)]
+struct ListClipsQuery {
+    dir: String,
+}
+
+#[derive(Serialize)]
+struct ClipFolderEntry {
+    folder_name: String,
+    path: String,
+    has_edit_plan: bool,
+    slice_count: usize,
+}
+
+async fn list_clip_folders(
+    axum::extract::Query(q): axum::extract::Query<ListClipsQuery>,
+) -> Result<Json<Vec<ClipFolderEntry>>, AppError> {
+    let root = std::path::Path::new(&q.dir);
+    if !root.is_dir() {
+        return Err(AppError::BadRequest(format!(
+            "Not a directory: {}",
+            q.dir
+        )));
+    }
+
+    let mut entries: Vec<ClipFolderEntry> = Vec::new();
+    let dir_entries = std::fs::read_dir(root)
+        .map_err(|e| AppError::Internal(format!("Failed to read directory: {}", e)))?;
+
+    for entry in dir_entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        // Require at least one non-slice .mp4 to qualify as a clip folder.
+        let mut has_clip_mp4 = false;
+        let mut slice_count = 0usize;
+        let mut has_edit_plan = false;
+        if let Ok(children) = std::fs::read_dir(&path) {
+            for child in children.flatten() {
+                let p = child.path();
+                if !p.is_file() {
+                    continue;
+                }
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+                if ext == "mp4" {
+                    if stem.starts_with("slice_") {
+                        slice_count += 1;
+                    } else {
+                        has_clip_mp4 = true;
+                    }
+                } else if ext == "txt" && stem.ends_with("_edit_plan") {
+                    has_edit_plan = true;
+                }
+            }
+        }
+        if has_clip_mp4 {
+            let folder_name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            entries.push(ClipFolderEntry {
+                folder_name,
+                path: path.to_string_lossy().into_owned(),
+                has_edit_plan,
+                slice_count,
+            });
+        }
+    }
+
+    // If the directory itself is a single clip folder, return it alone.
+    if entries.is_empty() {
+        let mut has_clip_mp4 = false;
+        let mut slice_count = 0usize;
+        let mut has_edit_plan = false;
+        if let Ok(children) = std::fs::read_dir(root) {
+            for child in children.flatten() {
+                let p = child.path();
+                if !p.is_file() {
+                    continue;
+                }
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+                if ext == "mp4" {
+                    if stem.starts_with("slice_") {
+                        slice_count += 1;
+                    } else {
+                        has_clip_mp4 = true;
+                    }
+                } else if ext == "txt" && stem.ends_with("_edit_plan") {
+                    has_edit_plan = true;
+                }
+            }
+        }
+        if has_clip_mp4 {
+            entries.push(ClipFolderEntry {
+                folder_name: root
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string(),
+                path: root.to_string_lossy().into_owned(),
+                has_edit_plan,
+                slice_count,
+            });
+        }
+    }
+
+    entries.sort_by(|a, b| a.folder_name.cmp(&b.folder_name));
+    Ok(Json(entries))
+}
+
+#[derive(Deserialize)]
+struct PremierePromptRequest {
+    clip_dir: String,
+}
+
+/// Scans a folder name for the first digit run that follows "clip" (case
+/// insensitive), e.g. "clip_01_Foo" → Some(1), "CLIP 42" → Some(42).
+fn extract_clip_number(folder: &str) -> Option<u32> {
+    let lower = folder.to_lowercase();
+    let idx = lower.find("clip")?;
+    let rest = &folder[idx + 4..];
+    let mut digits = String::new();
+    for c in rest.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+        } else if !digits.is_empty() {
+            break;
+        }
+    }
+    digits.parse().ok()
+}
+
+
+async fn write_premiere_prompt(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PremierePromptRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let clip_dir = std::path::Path::new(&body.clip_dir);
+    if !clip_dir.is_dir() {
+        return Err(AppError::BadRequest(format!(
+            "Not a directory: {}",
+            body.clip_dir
+        )));
+    }
+    let folder_name = clip_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("clip");
+
+    let seq_name = match extract_clip_number(folder_name) {
+        Some(n) => format!("clip_{:02}_Shorts", n),
+        None => format!("{}_Shorts", folder_name),
+    };
+
+    let cfg = crate::server::premiere::load_config(&state.db)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to load premiere config: {}", e)))?;
+    let prompt = crate::server::premiere::build_prompt(&cfg, &body.clip_dir, &seq_name);
+
+    let out_path = clip_dir.join("premiere_setup_prompt.md");
+    let _ = std::fs::write(&out_path, &prompt);
+
+    Ok(Json(json!({
+        "status": "ok",
+        "path": out_path.to_string_lossy(),
+        "prompt": prompt,
+        "sequence_name": seq_name,
+    })))
+}
+
+async fn get_premiere_settings(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<crate::server::premiere::PremiereConfig>, AppError> {
+    let cfg = crate::server::premiere::load_config(&state.db)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to load premiere config: {}", e)))?;
+    Ok(Json(cfg))
+}
+
+async fn put_premiere_settings(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::server::premiere::PremiereConfig>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    crate::server::premiere::save_config(&state.db, &body)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to save premiere config: {}", e)))?;
+    Ok(Json(json!({"status": "ok"})))
 }
 
 async fn pipeline_cancel(
@@ -315,6 +514,74 @@ async fn provider_models(
     }
 
     Ok(Json(models))
+}
+
+#[derive(Deserialize)]
+struct TestProviderRequest {
+    provider: String,
+    model: String,
+    #[serde(default)]
+    api_key: String,
+    #[serde(default)]
+    base_url: String,
+}
+
+async fn test_provider(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TestProviderRequest>,
+) -> Json<serde_json::Value> {
+    // Resolve API key: fall back to the settings-level key for the provider
+    // if the profile doesn't have one.
+    let api_key = if body.api_key.is_empty() {
+        match body.provider.as_str() {
+            "anthropic" | "claude_code" => state.settings.anthropic_api_key.clone(),
+            "openai" => state.settings.openai_api_key.clone(),
+            "gemini" => state.settings.gemini_api_key.clone(),
+            "grok" => state.settings.xai_api_key.clone(),
+            _ => String::new(),
+        }
+    } else {
+        body.api_key.clone()
+    };
+
+    let provider_box = match provider_registry::make_provider(
+        &body.provider,
+        &api_key,
+        &body.base_url,
+        state.http_client.clone(),
+        None,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            return Json(json!({
+                "success": false,
+                "error": format!("Failed to construct provider: {}", e),
+            }));
+        }
+    };
+
+    let system = "You are connected to Trik_Klip for a connection test.";
+    let user = "Respond with exactly the single word: OK";
+
+    match provider_box.message(&body.model, user, system, 64).await {
+        Ok(resp) => {
+            let preview = resp.text.chars().take(200).collect::<String>();
+            Json(json!({
+                "success": true,
+                "provider": body.provider,
+                "model": body.model,
+                "response": preview,
+                "input_tokens": resp.input_tokens,
+                "output_tokens": resp.output_tokens,
+            }))
+        }
+        Err(e) => Json(json!({
+            "success": false,
+            "provider": body.provider,
+            "model": body.model,
+            "error": format!("{}", e),
+        })),
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -79,30 +79,50 @@ pub struct ExtractParams {
     pub source_path: String,
     pub output_dir: String,
     pub clips: Vec<ClipSuggestion>,
+    /// Full transcript for the source, used to write per-clip transcript
+    /// slices. Optional — if omitted, per-clip transcripts are skipped.
+    #[serde(default)]
+    pub segments: Vec<TranscriptSegment>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SliceParams {
-    /// Path to the clip MP4 to slice.
-    pub clip_path: String,
-    /// The clip suggestion that this clip was extracted from (for prompt building).
-    pub clip: ClipSuggestion,
-    /// Full transcript segments (source-file timestamps).
-    pub segments: Vec<TranscriptSegment>,
-    /// LLM provider key.
+    /// Parent directory containing per-clip subfolders (output of Extract).
+    /// Each subfolder is expected to hold a `clip_NN_Title.mp4` + matching
+    /// `clip_NN_Title.json` metadata, and optionally `_transcript.json`.
+    /// As a fallback, if `clip_dir` itself contains a clip mp4 (not starting
+    /// with `slice_`), it's treated as a single-clip folder.
+    pub clip_dir: String,
     pub provider: String,
     pub model: String,
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
+    #[serde(default)]
+    pub editing_notes: Option<String>,
+    #[serde(default)]
+    pub premiere: bool,
+    #[serde(default)]
+    pub davinci: bool,
+    #[serde(default)]
+    pub auto_remove: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AnalyzeOnlyParams {
+    #[serde(default)]
     pub source_path: String,
+    #[serde(default)]
     pub output_dir: String,
+    /// SHA-256 of the source file (used to look up a cached transcript in the
+    /// DB). One of `transcript_hash` or `transcript_path` must be provided.
+    #[serde(default)]
     pub transcript_hash: String,
+    /// Path to a transcript JSON file on disk (Python-compatible format:
+    /// `[{"start": number, "end": number, "text": string}, ...]`).
+    #[serde(default)]
+    pub transcript_path: Option<String>,
     pub provider: String,
     pub model: String,
     #[serde(default)]
@@ -128,6 +148,10 @@ pub struct PipelineResult {
     pub clips: Vec<ClipSuggestion>,
     pub transcript_hash: String,
     pub duration_seconds: f64,
+    /// Full transcript for the source — forwarded to the client in the
+    /// ClipsReady SSE event so it can pass them back on Extract.
+    #[serde(default)]
+    pub segments: Vec<TranscriptSegment>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -152,7 +176,17 @@ pub struct ExtractedClipInfo {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SliceResult {
-    pub slices: Vec<String>,
+    pub clips_processed: usize,
+    pub total_slices: usize,
+    pub per_clip: Vec<ClipSliceInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClipSliceInfo {
+    pub clip_dir: String,
+    pub edit_plan_path: String,
+    pub slice_paths: Vec<String>,
+    pub error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +332,7 @@ pub async fn run_full_pipeline(
         Ok(pipe_result) => {
             let _ = state.progress_tx.send(ProgressEvent::ClipsReady {
                 clips: pipe_result.clips.clone(),
+                segments: pipe_result.segments.clone(),
             });
             let _ = state.progress_tx.send(ProgressEvent::PipelineDone);
         }
@@ -482,6 +517,7 @@ async fn run_full_pipeline_inner(
         clips,
         transcript_hash: file_hash,
         duration_seconds: duration,
+        segments,
     })
 }
 
@@ -642,6 +678,7 @@ pub async fn run_analyze_only(
         Ok(pipe_result) => {
             let _ = state.progress_tx.send(ProgressEvent::ClipsReady {
                 clips: pipe_result.clips.clone(),
+                segments: pipe_result.segments.clone(),
             });
             let _ = state.progress_tx.send(ProgressEvent::PipelineDone);
         }
@@ -662,22 +699,60 @@ async fn run_analyze_only_inner(
     let mut cancel_rx = state.cancel_tx.subscribe();
     let tx = &state.progress_tx;
 
-    // Load cached transcript
-    let row = db::get_transcript_by_hash(&state.db, &params.transcript_hash)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("No cached transcript for hash: {}", params.transcript_hash))?;
-
-    let segments: Vec<TranscriptSegment> = serde_json::from_str(&row.segments_json)?;
-    let duration = row.duration_seconds;
-
-    // Re-detect spikes if WAV available
-    let wav_path = temp_wav_path(&state, &params.source_path);
-    let spikes = if wav_path.exists() {
-        let wp = wav_path.to_string_lossy().to_string();
-        tokio::task::spawn_blocking(move || detect_volume_spikes_default(&wp)).await??
+    // Load transcript. Prefer an explicit file path (Python-compatible JSON);
+    // fall back to a DB lookup by hash.
+    let (segments, duration, source_hash) = if let Some(path) = params
+        .transcript_path
+        .as_ref()
+        .filter(|p| !p.is_empty())
+    {
+        let _ = tx.send(ProgressEvent::Log {
+            level: "info".into(),
+            message: format!("Loading transcript from file: {}", path),
+        });
+        let bytes = tokio::fs::read(path)
+            .await
+            .with_context(|| format!("Failed to read transcript file: {}", path))?;
+        let segs: Vec<TranscriptSegment> = serde_json::from_slice(&bytes)
+            .with_context(|| format!("Transcript JSON did not match expected schema at {}", path))?;
+        if segs.is_empty() {
+            anyhow::bail!("Transcript file contained no segments: {}", path);
+        }
+        // Duration = end of last segment (no source media to probe).
+        let dur = segs
+            .iter()
+            .map(|s| s.end)
+            .fold(0.0_f64, f64::max);
+        (segs, dur, params.transcript_hash.clone())
+    } else if !params.transcript_hash.is_empty() {
+        let row = db::get_transcript_by_hash(&state.db, &params.transcript_hash)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No cached transcript for hash: {}",
+                    params.transcript_hash
+                )
+            })?;
+        let segs: Vec<TranscriptSegment> = serde_json::from_str(&row.segments_json)?;
+        (segs, row.duration_seconds, row.file_hash)
     } else {
-        warn!("WAV not found for spike detection, skipping spike annotation");
+        anyhow::bail!(
+            "Analyze Only requires either `transcript_path` or `transcript_hash`"
+        );
+    };
+
+    // Re-detect spikes if WAV available (only when we have a source path).
+    let spikes = if params.source_path.is_empty() {
         Vec::new()
+    } else {
+        let wav_path = temp_wav_path(&state, &params.source_path);
+        if wav_path.exists() {
+            let wp = wav_path.to_string_lossy().to_string();
+            tokio::task::spawn_blocking(move || detect_volume_spikes_default(&wp)).await??
+        } else {
+            warn!("WAV not found for spike detection, skipping spike annotation");
+            Vec::new()
+        }
     };
     check_cancel(&mut cancel_rx)?;
 
@@ -713,8 +788,9 @@ async fn run_analyze_only_inner(
 
     Ok(PipelineResult {
         clips,
-        transcript_hash: params.transcript_hash,
+        transcript_hash: source_hash,
         duration_seconds: duration,
+        segments,
     })
 }
 
@@ -766,6 +842,16 @@ async fn run_extract_clips_inner(
 
     std::fs::create_dir_all(&params.output_dir)?;
 
+    // Per-clip transcript slices are written when the client provides the
+    // full transcript via `segments`. We do NOT hash the source file here —
+    // hashing multi-GB videos takes minutes and would block extraction for
+    // no good reason.
+    let all_segments: Option<&Vec<TranscriptSegment>> = if params.segments.is_empty() {
+        None
+    } else {
+        Some(&params.segments)
+    };
+
     let mut extracted = Vec::new();
 
     for (i, clip) in params.clips.iter().enumerate() {
@@ -778,16 +864,23 @@ async fn run_extract_clips_inner(
             .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
             .collect();
         let safe_title = safe_title.trim().replace(' ', "_");
-        let clip_filename = format!(
-            "clip_{:02}_{}.mp4",
-            clip.rank,
-            if safe_title.len() > 40 {
-                &safe_title[..40]
-            } else {
-                &safe_title
-            }
-        );
-        let clip_path = Path::new(&params.output_dir).join(&clip_filename);
+        let truncated_title = if safe_title.len() > 40 {
+            &safe_title[..40]
+        } else {
+            &safe_title
+        };
+        let clip_name = format!("clip_{:02}_{}", clip.rank, truncated_title);
+
+        // Each clip goes in its own subfolder (matches Python layout):
+        //   <output_dir>/clip_NN_Title/
+        //     clip_NN_Title.mp4
+        //     clip_NN_Title.json         — metadata
+        //     clip_NN_Title_transcript.json  — transcript slice (if available)
+        let clip_dir = Path::new(&params.output_dir).join(&clip_name);
+        std::fs::create_dir_all(&clip_dir)?;
+
+        let clip_filename = format!("{}.mp4", clip_name);
+        let clip_path = clip_dir.join(&clip_filename);
 
         let duration = clip.clip_end - clip.clip_start;
 
@@ -801,10 +894,24 @@ async fn run_extract_clips_inner(
         )
         .await?;
 
-        // Write sidecar JSON with clip metadata
-        let sidecar_path = clip_path.with_extension("json");
-        let sidecar = serde_json::to_string_pretty(clip)?;
-        tokio::fs::write(&sidecar_path, sidecar).await?;
+        // Metadata sidecar
+        let meta_path = clip_dir.join(format!("{}.json", clip_name));
+        let meta_json = serde_json::to_string_pretty(clip)?;
+        tokio::fs::write(&meta_path, meta_json).await?;
+
+        // Per-clip transcript slice (if we have the full transcript handy)
+        if let Some(segments) = all_segments {
+            let clip_segs: Vec<&TranscriptSegment> = segments
+                .iter()
+                .filter(|s| s.start >= clip.clip_start && s.end <= clip.clip_end)
+                .collect();
+            if !clip_segs.is_empty() {
+                let transcript_path =
+                    clip_dir.join(format!("{}_transcript.json", clip_name));
+                let transcript_json = serde_json::to_string_pretty(&clip_segs)?;
+                tokio::fs::write(&transcript_path, transcript_json).await?;
+            }
+        }
 
         let _ = tx.send(ProgressEvent::ClipExtraction {
             done: i + 1,
@@ -867,84 +974,302 @@ async fn run_generate_slices_inner(
     let mut cancel_rx = state.cancel_tx.subscribe();
     let tx = &state.progress_tx;
 
-    // Build the editing prompt
-    let clip_segments: Vec<TranscriptSegment> = params
-        .segments
-        .iter()
-        .filter(|s| s.start >= params.clip.clip_start && s.end <= params.clip.clip_end)
-        .cloned()
-        .collect();
+    let root = Path::new(&params.clip_dir);
+    if !root.is_dir() {
+        anyhow::bail!("clip_dir is not a directory: {}", params.clip_dir);
+    }
 
-    let editing_prompt = build_editing_prompt(&params.clip, &clip_segments);
+    // Discover per-clip folders. We first check subdirectories; if none
+    // contain a clip mp4, treat the root itself as a single clip folder.
+    let mut clip_folders: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(root)? {
+        let Ok(entry) = entry else { continue; };
+        let p = entry.path();
+        if p.is_dir() && folder_has_clip_mp4(&p) {
+            clip_folders.push(p);
+        }
+    }
+    clip_folders.sort();
 
-    // Call LLM for editing plan
+    if clip_folders.is_empty() && folder_has_clip_mp4(root) {
+        clip_folders.push(root.to_path_buf());
+    }
+
+    if clip_folders.is_empty() {
+        anyhow::bail!("No clip folders found in: {}", params.clip_dir);
+    }
+
     let api_key = resolve_api_key(&state, &params.provider, params.api_key.as_deref());
     let base_url = resolve_base_url(&state, &params.provider, params.base_url.as_deref());
-    let provider_box =
-        make_provider(&params.provider, &api_key, &base_url, state.http_client.clone(), Some(cancel_rx.clone()))?;
+    let provider_box = make_provider(
+        &params.provider,
+        &api_key,
+        &base_url,
+        state.http_client.clone(),
+        Some(cancel_rx.clone()),
+    )?;
 
-    let _ = tx.send(ProgressEvent::Log {
-        level: "info".into(),
-        message: "Generating editing plan...".into(),
-    });
+    let editing_notes = params
+        .editing_notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
 
-    let response = provider_box
-        .message(
+    let total_clips = clip_folders.len();
+    let mut per_clip_results: Vec<ClipSliceInfo> = Vec::new();
+    let mut total_slices = 0usize;
+
+    for (clip_idx, clip_dir) in clip_folders.iter().enumerate() {
+        check_cancel(&mut cancel_rx)?;
+
+        let folder_name = clip_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("clip")
+            .to_string();
+
+        let _ = tx.send(ProgressEvent::Log {
+            level: "info".into(),
+            message: format!(
+                "[{}/{}] Generating slices for {}",
+                clip_idx + 1,
+                total_clips,
+                folder_name
+            ),
+        });
+
+        match process_single_clip_dir(
+            clip_dir,
+            provider_box.as_ref(),
             &params.model,
+            editing_notes,
+            params.premiere,
+            &state.settings.ffmpeg_path,
+            &state.http_client,
+            &mut cancel_rx,
+            tx,
+            &mut total_slices,
+        )
+        .await
+        {
+            Ok(info) => per_clip_results.push(info),
+            Err(e) => {
+                warn!("Slice generation failed for {}: {}", clip_dir.display(), e);
+                let _ = tx.send(ProgressEvent::Log {
+                    level: "warn".into(),
+                    message: format!("Skipping {}: {}", folder_name, e),
+                });
+                per_clip_results.push(ClipSliceInfo {
+                    clip_dir: clip_dir.to_string_lossy().into_owned(),
+                    edit_plan_path: String::new(),
+                    slice_paths: Vec::new(),
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    Ok(SliceResult {
+        clips_processed: total_clips,
+        total_slices,
+        per_clip: per_clip_results,
+    })
+}
+
+/// Returns true if `folder` directly contains a `.mp4` whose name doesn't
+/// start with `slice_` (i.e., it looks like an extracted clip).
+fn folder_has_clip_mp4(folder: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let ext_mp4 = p.extension().and_then(|s| s.to_str()) == Some("mp4");
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if ext_mp4 && !stem.starts_with("slice_") {
+            return true;
+        }
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_single_clip_dir(
+    clip_dir: &Path,
+    provider: &dyn trik_klip_core::llm::LlmProvider,
+    model: &str,
+    editing_notes: Option<&str>,
+    premiere: bool,
+    ffmpeg_path: &str,
+    http_client: &reqwest::Client,
+    cancel_rx: &mut watch::Receiver<bool>,
+    tx: &tokio::sync::broadcast::Sender<ProgressEvent>,
+    total_slices_counter: &mut usize,
+) -> Result<ClipSliceInfo> {
+    // Locate the clip mp4, metadata json, transcript json, and a possible
+    // Python-written editing-prompt text file inside this folder.
+    let mut clip_mp4: Option<PathBuf> = None;
+    let mut meta_json: Option<PathBuf> = None;
+    let mut transcript_json: Option<PathBuf> = None;
+    let mut editing_prompt_txt: Option<PathBuf> = None;
+
+    for entry in std::fs::read_dir(clip_dir)? {
+        let Ok(entry) = entry else { continue; };
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+        match ext {
+            "mp4" if !stem.starts_with("slice_") => clip_mp4 = Some(p),
+            "json" if stem.ends_with("_transcript") => transcript_json = Some(p),
+            "json" => {
+                if meta_json.is_none() {
+                    meta_json = Some(p);
+                }
+            }
+            "txt" if stem.ends_with("_editing_prompt") => editing_prompt_txt = Some(p),
+            _ => {}
+        }
+    }
+
+    let clip_mp4 = clip_mp4.ok_or_else(|| anyhow::anyhow!("No clip .mp4 found in folder"))?;
+
+    // Load transcript segments (optional — used for sentence-boundary snapping)
+    let segments: Vec<TranscriptSegment> = if let Some(tp) = &transcript_json {
+        match tokio::fs::read(tp).await {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Resolve the (clip, editing_prompt) pair using one of three paths:
+    // 1. Rust-native: read `<clip>.json` → ClipSuggestion, then regenerate
+    //    the prompt with `build_editing_prompt`.
+    // 2. Python-compat: no metadata json but a `*_editing_prompt.txt` exists
+    //    → use that prompt verbatim and reconstruct a minimal ClipSuggestion
+    //    from its "Source range" header.
+    // 3. Neither: bail with a clear error.
+    let (clip, mut editing_prompt): (ClipSuggestion, String) = if let Some(mp) = &meta_json {
+        let bytes = tokio::fs::read(mp).await?;
+        let parsed: ClipSuggestion = serde_json::from_slice(&bytes)
+            .with_context(|| format!("Failed to parse clip metadata: {}", mp.display()))?;
+        let prompt = build_editing_prompt(&parsed, &segments);
+        (parsed, prompt)
+    } else if let Some(tp) = &editing_prompt_txt {
+        let prompt = tokio::fs::read_to_string(tp)
+            .await
+            .with_context(|| format!("Failed to read {}", tp.display()))?;
+        let suggestion = reconstruct_clip_suggestion_from_prompt(&prompt, clip_mp4.as_path());
+        (suggestion, prompt)
+    } else {
+        anyhow::bail!(
+            "No clip metadata found. Expected either a <clip>.json or <clip>_editing_prompt.txt \
+             alongside the clip MP4 (run Extract first)."
+        );
+    };
+    if let Some(notes) = editing_notes {
+        editing_prompt.push_str(
+            "\n\n\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\n\
+             ADDITIONAL EDITING NOTES FROM THE USER\n\
+             \u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\n\
+             Follow these instructions alongside the standard rules above:\n\n",
+        );
+        editing_prompt.push_str(notes);
+        editing_prompt.push('\n');
+    }
+
+    // Call the LLM for the editing plan.
+    let response = provider
+        .message(
+            model,
             &editing_prompt,
             "You are an expert short-form video editor.",
-            2000,
+            4096,
         )
         .await?;
 
-    check_cancel(&mut cancel_rx)?;
+    check_cancel(cancel_rx)?;
 
-    // Parse cut list from the response
+    // Save the edit plan next to the clip.
+    let clip_stem = clip_mp4
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("clip")
+        .to_string();
+    let plan_path = clip_dir.join(format!("{}_edit_plan.txt", clip_stem));
+    tokio::fs::write(&plan_path, &response.text).await?;
+
+    // Parse the cut list.
     let cuts = parse_cut_list(&response.text);
-
     if cuts.is_empty() {
-        anyhow::bail!("LLM returned no valid cut list entries");
+        return Ok(ClipSliceInfo {
+            clip_dir: clip_dir.to_string_lossy().into_owned(),
+            edit_plan_path: plan_path.to_string_lossy().into_owned(),
+            slice_paths: Vec::new(),
+            error: Some("LLM returned no parseable cuts".into()),
+        });
     }
 
-    // Get clip duration for clamping
-    let clip_duration =
-        get_duration(&state.settings.ffprobe_path, &params.clip_path).await?;
+    // Clean up old slice_*.mp4 files so we don't mix old and new results.
+    if let Ok(entries) = std::fs::read_dir(clip_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let ext_mp4 = p.extension().and_then(|s| s.to_str()) == Some("mp4");
+            if ext_mp4 && stem.starts_with("slice_") {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
 
-    // Extract each slice
-    let clip_dir = Path::new(&params.clip_path)
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
-    let clip_stem = Path::new(&params.clip_path)
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "clip".into());
+    // Get clip duration for clamping.
+    let clip_duration = clip.clip_end - clip.clip_start;
 
-    let slices_dir = clip_dir.join(format!("{}_slices", clip_stem));
-    std::fs::create_dir_all(&slices_dir)?;
+    let mut slice_paths: Vec<String> = Vec::new();
+    let total_cuts = cuts.len();
 
-    let total = cuts.len();
-    let mut slice_paths = Vec::new();
+    // Emit a 0/N event so the UI bar can size itself immediately.
+    let _ = tx.send(ProgressEvent::SliceGeneration {
+        done: 0,
+        total: total_cuts,
+    });
 
     for (i, cut) in cuts.iter().enumerate() {
-        check_cancel(&mut cancel_rx)?;
+        check_cancel(cancel_rx)?;
 
-        // Snap the end to sentence boundaries
-        let snapped_end = snap_cut_end(cut.end, &clip_segments, 1.0, Some(params.clip.clip_end));
+        // Snap end to sentence boundary using the transcript segments.
+        let snapped_end = snap_cut_end(cut.end, &segments, 2.0, Some(clip.clip_end));
 
-        // Convert source-file-relative timestamps to clip-relative
-        let seek = (cut.start - params.clip.clip_start).max(0.0);
+        // Source-file timestamps → clip-file relative timestamps.
+        let seek = (cut.start - clip.clip_start).max(0.0);
         let duration = (snapped_end - cut.start).min(clip_duration - seek).max(0.0);
 
         if duration < 1.0 {
-            warn!("Skipping slice {} — duration too short ({:.1}s)", i + 1, duration);
+            warn!(
+                "Skipping slice {} in {} — duration too short ({:.1}s)",
+                i + 1,
+                clip_dir.display(),
+                duration
+            );
+            let _ = tx.send(ProgressEvent::SliceGeneration {
+                done: i + 1,
+                total: total_cuts,
+            });
             continue;
         }
 
-        let slice_path = slices_dir.join(format!("slice_{:02}.mp4", i + 1));
+        let slice_path = clip_dir.join(format!("slice_{:02}.mp4", i + 1));
 
         extract_slice(
-            &state.settings.ffmpeg_path,
-            &params.clip_path,
+            ffmpeg_path,
+            &clip_mp4.to_string_lossy(),
             &slice_path.to_string_lossy(),
             seek,
             duration,
@@ -952,19 +1277,154 @@ async fn run_generate_slices_inner(
         )
         .await?;
 
+        slice_paths.push(slice_path.to_string_lossy().into_owned());
+        *total_slices_counter += 1;
+
         let _ = tx.send(ProgressEvent::SliceGeneration {
             done: i + 1,
-            total,
+            total: total_cuts,
         });
-
-        slice_paths.push(slice_path.to_string_lossy().into_owned());
     }
 
-    // Write the editing plan as a sidecar
-    let plan_path = slices_dir.join("editing_plan.txt");
-    tokio::fs::write(&plan_path, &response.text).await?;
+    // Visual aid image fetch — ask the LLM for per-slice search queries,
+    // scrape Bing, download + re-encode as clean JPEGs named
+    // `visual_NN.jpg` next to the slices. Non-fatal on failure.
+    let _ = tx.send(ProgressEvent::Log {
+        level: "info".into(),
+        message: format!(
+            "Fetching visual aids for {}…",
+            clip_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("clip")
+        ),
+    });
+    match trik_klip_core::visuals::generate_visual_aids(
+        clip_dir,
+        &cuts,
+        provider,
+        model,
+        http_client,
+        Some(&*cancel_rx),
+        Some(tx),
+    )
+    .await
+    {
+        Ok(n) => {
+            let _ = tx.send(ProgressEvent::Log {
+                level: "info".into(),
+                message: format!("Visual aids: {} image(s) saved", n),
+            });
+        }
+        Err(e) => {
+            let _ = tx.send(ProgressEvent::Log {
+                level: "warn".into(),
+                message: format!("Visual aid step failed (non-fatal): {}", e),
+            });
+        }
+    }
 
-    Ok(SliceResult {
-        slices: slice_paths,
+    // Optional Premiere setup prompt (matches Python's output).
+    if premiere {
+        let folder_name = clip_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("clip");
+        let seq_name = format!("{}_Shorts", folder_name);
+        let premiere_prompt = format!(
+            "# Premiere Pro Setup\n\n\
+             1. Import all files from: {}\n\
+             2. Create sequence named: {}\n\
+             3. Place slices in order on timeline\n",
+            clip_dir.to_string_lossy().replace('\\', "/"),
+            seq_name,
+        );
+        let _ = tokio::fs::write(clip_dir.join("premiere_setup_prompt.md"), premiere_prompt).await;
+    }
+
+    Ok(ClipSliceInfo {
+        clip_dir: clip_dir.to_string_lossy().into_owned(),
+        edit_plan_path: plan_path.to_string_lossy().into_owned(),
+        slice_paths,
+        error: None,
     })
+}
+
+/// For clip folders written by the Python version (which emits a
+/// `*_editing_prompt.txt` instead of a JSON metadata sidecar), reconstruct
+/// a minimal `ClipSuggestion` by parsing the prompt header.
+///
+/// The prompt has a line like:  Source range:  00:12:34 → 00:15:00
+/// We extract the two timestamps into `clip_start` / `clip_end`. Title,
+/// content_type, etc. come from the folder name so the per-clip edit plan
+/// and slice files are still labeled sensibly.
+fn reconstruct_clip_suggestion_from_prompt(prompt: &str, clip_mp4: &Path) -> ClipSuggestion {
+    let (clip_start, clip_end) = parse_source_range(prompt).unwrap_or((0.0, 0.0));
+
+    let title = clip_mp4
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Clip")
+        .to_string();
+
+    // Best-effort: pull the "Title:" line if the Python prompt has one.
+    let better_title = extract_prompt_field(prompt, "Title:").unwrap_or_else(|| title.clone());
+    let content_type = extract_prompt_field(prompt, "Content type:")
+        .unwrap_or_else(|| "other".into());
+    let hook = extract_prompt_field(prompt, "Auto-detected hook note:")
+        .unwrap_or_default();
+
+    ClipSuggestion {
+        rank: 0,
+        title: better_title,
+        hook,
+        segment_start: clip_start,
+        segment_end: clip_end,
+        clip_start,
+        clip_end,
+        clip_duration: (clip_end - clip_start).max(0.0),
+        content_type,
+        virality_score: 0,
+        transcript_excerpt: String::new(),
+    }
+}
+
+/// Parse "Source range:  HH:MM:SS → HH:MM:SS" out of a prompt body.
+/// Accepts "→", "->", "-", "–", "—" as the separator.
+fn parse_source_range(prompt: &str) -> Option<(f64, f64)> {
+    for line in prompt.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Source range:") {
+            // Replace common separators with a single ASCII one so splitting
+            // is predictable regardless of what character the writer used.
+            let normalised = rest
+                .replace('\u{2192}', " ")  // →
+                .replace('\u{2013}', " ")  // –
+                .replace('\u{2014}', " ")  // —
+                .replace("->", " ");
+            let parts: Vec<&str> = normalised.split_whitespace().collect();
+            if parts.len() >= 2 {
+                if let (Ok(a), Ok(b)) = (parse_time(parts[0]), parse_time(parts[1])) {
+                    return Some((a, b));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Pull a single-line value that follows a prefix like "Title:" on its own
+/// line or inline. Returns the trimmed value, or None if the field isn't
+/// present (or is empty).
+fn extract_prompt_field(prompt: &str, prefix: &str) -> Option<String> {
+    for line in prompt.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let value = rest.trim().trim_start_matches('|').trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
 }

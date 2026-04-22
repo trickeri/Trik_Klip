@@ -1,6 +1,6 @@
 const BASE = "http://127.0.0.1:31416";
 
-import type { ClipSuggestion } from './types';
+import type { ClipSuggestion, TranscriptSegment } from './types';
 
 export type ProgressEvent =
   | { type: "Hashing"; percent: number }
@@ -11,7 +11,8 @@ export type ProgressEvent =
   | { type: "Analysis"; done: number; total: number }
   | { type: "ClipExtraction"; done: number; total: number; clip_name: string }
   | { type: "SliceGeneration"; done: number; total: number }
-  | { type: "ClipsReady"; clips: ClipSuggestion[] }
+  | { type: "VisualAids"; done: number; total: number }
+  | { type: "ClipsReady"; clips: ClipSuggestion[]; segments?: TranscriptSegment[] }
   | { type: "Log"; level: string; message: string }
   | { type: "PipelineDone" }
   | { type: "PipelineError"; message: string };
@@ -48,16 +49,26 @@ import {
   transcriptionLabel,
   analysisProgress,
   extractionProgress,
+  sliceProgress,
+  visualProgress,
   currentStage,
   clips,
+  transcriptSegments,
   activeTab,
   addLog,
 } from './stores';
 
-// Tab index for the Extract tab in App.svelte's tab array.
+// Tab indices (matches App.svelte's tab array).
 const EXTRACT_TAB_INDEX = 1;
+const SLICE_TAB_INDEX = 2;
 
 export function connectProgress(): () => void {
+  // Track the last stage synchronously so PipelineDone can decide where to
+  // navigate before we clear the stage.
+  let lastStage = '';
+  const unsubStage = currentStage.subscribe(v => { lastStage = v; });
+  void unsubStage; // keep subscription alive for module lifetime
+
   return subscribeProgress((event) => {
     switch (event.type) {
       case 'Hashing':
@@ -91,10 +102,17 @@ export function connectProgress(): () => void {
         break;
       case 'SliceGeneration':
         currentStage.set('slices');
-        addLog('info', `Slice generation: ${event.done}/${event.total}`);
+        sliceProgress.set({ done: event.done, total: event.total });
+        break;
+      case 'VisualAids':
+        currentStage.set('visuals');
+        visualProgress.set({ done: event.done, total: event.total });
         break;
       case 'ClipsReady':
         clips.set(event.clips);
+        if (event.segments) {
+          transcriptSegments.set(event.segments);
+        }
         addLog('info', `Found ${event.clips.length} clip${event.clips.length === 1 ? '' : 's'}`);
         if (event.clips.length > 0) {
           activeTab.set(EXTRACT_TAB_INDEX);
@@ -103,11 +121,24 @@ export function connectProgress(): () => void {
       case 'Log':
         addLog(event.level, event.message);
         break;
-      case 'PipelineDone':
+      case 'PipelineDone': {
+        const wasExtracting = lastStage === 'extraction';
+        const wasSlicing = lastStage === 'slices';
+        console.log('[sse] PipelineDone — lastStage =', lastStage, 'wasExtracting =', wasExtracting);
         pipelineRunning.set(false);
         currentStage.set('');
         addLog('info', 'Pipeline complete!');
+        // After clips have been extracted to disk, send the user to Slice so
+        // they can generate cut plans from the new MP4s. The Slice tab already
+        // subscribes to outputDir for its clip_dir, so no extra wiring needed.
+        if (wasExtracting) {
+          activeTab.set(SLICE_TAB_INDEX);
+        } else if (wasSlicing) {
+          // No-op — already on Slice. Keeping for clarity if we add per-clip
+          // nav later.
+        }
         break;
+      }
       case 'PipelineError':
         pipelineRunning.set(false);
         currentStage.set('');

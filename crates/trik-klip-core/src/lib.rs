@@ -7,5 +7,6 @@ pub mod chunking;
 pub mod llm;
 pub mod clip_scoring;
 pub mod prompts;
+pub mod visuals;
 pub mod licensing;
 pub mod db;

@@ -455,6 +455,9 @@ def load_transcript_from_json(path: str) -> list[TranscriptSegment]:
 
 def save_transcript(segments: list[TranscriptSegment], path: str) -> None:
     """Save transcript to JSON for reuse."""
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump([asdict(s) for s in segments], f, indent=2)
     console.log(f"[green]✓ Transcript saved to:[/green] {path}")
@@ -781,6 +784,9 @@ def save_results(clips: list[ClipSuggestion], output_path: str) -> None:
         d["clip_end_fmt"] = fmt_time(clip.clip_end)
         data.append(d)
 
+    parent = os.path.dirname(output_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     console.log(f"[green]✓ Results saved to:[/green] {output_path}")

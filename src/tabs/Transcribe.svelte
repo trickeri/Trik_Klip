@@ -2,11 +2,18 @@
   import DropZone from '../components/DropZone.svelte';
   import ProgressBar from '../components/ProgressBar.svelte';
   import {
-    mp4Path, pipelineRunning, currentStage, language,
+    mp4Path, outputDir, pipelineRunning, currentStage, language,
     hashProgress, audioProgress, transcriptionProgress, transcriptionLabel,
     analysisProgress,
     addLog, resetProgress, activeProfile,
   } from '../lib/stores';
+
+  function defaultBaseDir(path: string): string {
+    // Everything for a given video goes under <mp4_parent>/Clips/<stem>/.
+    const dir = path.replace(/[/\\][^/\\]+$/, '');
+    const stem = path.replace(/^.*[/\\]/, '').replace(/\.[^.]+$/, '');
+    return `${dir}/Clips/${stem}`;
+  }
   import { apiFetch } from '../lib/api';
 
   let whisperModel = 'base';
@@ -27,16 +34,32 @@
   let saveTranscriptPath = '';
   let outputJsonPath = '';
 
+  // When a transcript is loaded (Analyze Only), default the shared output dir
+  // to <transcript_parent>/<stem>_clips — a sibling `_clips` folder next to
+  // the transcript, matching the Python layout. stem is derived from the
+  // transcript filename by stripping a trailing `_transcript`.
+  $: if (loadTranscriptPath) {
+    const parent = loadTranscriptPath.replace(/[/\\][^/\\]+$/, '');
+    const base = loadTranscriptPath
+      .replace(/^.*[/\\]/, '')
+      .replace(/\.[^.]+$/, '');
+    const stem = base.replace(/_transcript$/i, '');
+    if (parent && stem) outputDir.set(`${parent}/${stem}_clips`);
+  }
+
   const whisperModels = ['tiny', 'base', 'small', 'medium', 'large'];
 
   function onFileSelect(path: string) {
     mp4Path.set(path);
-    // Auto-fill output paths from video path
     if (path) {
-      const dir = path.replace(/[/\\][^/\\]+$/, '');
       const stem = path.replace(/^.*[/\\]/, '').replace(/\.[^.]+$/, '');
-      if (!saveTranscriptPath) saveTranscriptPath = `${dir}/${stem}_transcript.json`;
-      if (!outputJsonPath) outputJsonPath = `${dir}/${stem}_clips.json`;
+      const baseDir = defaultBaseDir(path);
+      if (!saveTranscriptPath) saveTranscriptPath = `${baseDir}/${stem}_transcript.json`;
+      if (!outputJsonPath) outputJsonPath = `${baseDir}/${stem}_clips.json`;
+      // Extract target is a nested <stem>_clips subfolder so per-clip
+      // subfolders don't clutter the top-level <stem> folder. Matches the
+      // Python layout.
+      outputDir.set(`${baseDir}/${stem}_clips`);
     }
   }
 
@@ -84,7 +107,7 @@
       window_minutes: windowMinutes,
       padding_seconds: paddingMinutes * 60,
       custom_prompts: prompts,
-      output_dir: $mp4Path ? $mp4Path.replace(/[/\\][^/\\]+$/, '') : '',
+      output_dir: $mp4Path ? defaultBaseDir($mp4Path) : '',
     };
 
     // Add provider info for modes that need analysis
@@ -93,6 +116,18 @@
       body.model = $activeProfile.model;
       body.api_key = $activeProfile.api_key;
       body.base_url = $activeProfile.base_url;
+    }
+
+    // Analyze Only: point the backend at the transcript file the user picked.
+    // It can load a Python-generated transcript JSON directly; no DB cache hit
+    // required.
+    if (runMode === 2 && loadTranscriptPath) {
+      body.transcript_path = loadTranscriptPath;
+      // If the user didn't provide an mp4, derive output_dir from the
+      // transcript's folder so extracted clips have somewhere to go later.
+      if (!$mp4Path) {
+        body.output_dir = loadTranscriptPath.replace(/[/\\][^/\\]+$/, '');
+      }
     }
 
     // Determine endpoint
@@ -123,17 +158,22 @@
     }
   }
 
-  function browseTranscript() {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.json';
-    input.onchange = () => {
-      const file = input.files?.[0];
-      if (file) {
-        loadTranscriptPath = (file as any).path || file.name;
+  async function browseTranscript() {
+    // Use Tauri's dialog plugin — HTML <input type="file"> gives only the
+    // filename in a webview, which the backend can't open.
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Transcript JSON', extensions: ['json'] }],
+      });
+      if (typeof selected === 'string' && selected) {
+        loadTranscriptPath = selected;
       }
-    };
-    input.click();
+    } catch (e: any) {
+      addLog('error', `File picker failed: ${e.message || e}`);
+    }
   }
 
   language.subscribe(v => { selectedLanguage = v; });
@@ -205,21 +245,23 @@
   <div class="card">
     <h4 class="card-title">File Paths</h4>
 
-    <div class="path-row">
-      <span class="path-label">Load Transcript</span>
-      <input type="text" bind:value={loadTranscriptPath} placeholder="(optional) existing transcript JSON" disabled={$pipelineRunning} />
-      <button class="btn btn-small btn-secondary" on:click={browseTranscript} disabled={$pipelineRunning}>Browse</button>
-    </div>
+    {#if runMode === 2}
+      <div class="path-row">
+        <span class="path-label">Load Transcript</span>
+        <input type="text" bind:value={loadTranscriptPath} placeholder="existing transcript JSON" disabled={$pipelineRunning} />
+        <button class="btn btn-small btn-secondary" on:click={browseTranscript} disabled={$pipelineRunning}>Browse</button>
+      </div>
+    {:else}
+      <div class="path-row">
+        <span class="path-label">Save Transcript</span>
+        <input type="text" bind:value={saveTranscriptPath} placeholder="(auto-filled from video)" disabled={$pipelineRunning} />
+      </div>
 
-    <div class="path-row">
-      <span class="path-label">Save Transcript</span>
-      <input type="text" bind:value={saveTranscriptPath} placeholder="(auto-filled from video)" disabled={$pipelineRunning} />
-    </div>
-
-    <div class="path-row">
-      <span class="path-label">Output JSON</span>
-      <input type="text" bind:value={outputJsonPath} placeholder="(auto-filled from video)" disabled={$pipelineRunning} />
-    </div>
+      <div class="path-row">
+        <span class="path-label">Output JSON</span>
+        <input type="text" bind:value={outputJsonPath} placeholder="(auto-filled from video)" disabled={$pipelineRunning} />
+      </div>
+    {/if}
   </div>
 
   <!-- Run Mode Card -->
