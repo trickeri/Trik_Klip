@@ -216,11 +216,22 @@ pub async fn call_claude_cli(
         buf
     });
 
+    // 5-minute hard ceiling per call. If Claude hangs (rare but seen in
+    // practice on the last chunk), the whole analysis stalls because
+    // `JoinSet::join_next` waits on every spawned task. A per-call timeout
+    // turns that into a single failed chunk that the pipeline can skip past.
+    const CLAUDE_CLI_TIMEOUT_SECS: u64 = 300;
+
     let status = tokio::select! {
         s = child.wait() => s.map_err(|e| CliError::ExecutionFailed(e.to_string()))?,
         _ = wait_cancelled(cancel_rx.as_mut()) => {
             let _ = child.kill().await;
             return Err(CliError::ExecutionFailed("Pipeline cancelled by user".into()));
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_secs(CLAUDE_CLI_TIMEOUT_SECS)) => {
+            warn!("Claude CLI call exceeded {}s — killing", CLAUDE_CLI_TIMEOUT_SECS);
+            let _ = child.kill().await;
+            return Err(CliError::Timeout);
         }
     };
 
