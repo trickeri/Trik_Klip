@@ -4,6 +4,7 @@ import type { ClipSuggestion, TranscriptSegment } from './types';
 
 export type ProgressEvent =
   | { type: "Hashing"; percent: number }
+  | { type: "WhisperDownload"; model: string; percent: number; bytes_done: number; bytes_total: number }
   | { type: "AudioExtraction"; percent: number }
   | { type: "SpikeDetection"; spike_count: number }
   | { type: "Transcription"; percent: number; label: string }
@@ -44,6 +45,7 @@ export function subscribeProgress(
 import {
   pipelineRunning,
   hashProgress,
+  whisperDownloadProgress,
   audioProgress,
   transcriptionProgress,
   transcriptionLabel,
@@ -74,6 +76,15 @@ export function connectProgress(): () => void {
       case 'Hashing':
         currentStage.set('hashing');
         hashProgress.set(event.percent);
+        break;
+      case 'WhisperDownload':
+        currentStage.set('whisper_download');
+        whisperDownloadProgress.set({
+          model: event.model,
+          percent: event.percent,
+          bytes_done: event.bytes_done,
+          bytes_total: event.bytes_total,
+        });
         break;
       case 'AudioExtraction':
         currentStage.set('audio');

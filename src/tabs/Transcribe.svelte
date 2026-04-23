@@ -4,7 +4,7 @@
   import {
     mp4Path, outputDir, pipelineRunning, currentStage, language,
     hashProgress, audioProgress, transcriptionProgress, transcriptionLabel,
-    analysisProgress,
+    analysisProgress, whisperDownloadProgress, audioTrack,
     addLog, resetProgress, activeProfile,
   } from '../lib/stores';
 
@@ -16,11 +16,18 @@
   }
   import { apiFetch } from '../lib/api';
 
-  let whisperModel = 'base';
+  // Default to 'small' (Python default). Persist the user's last choice so
+  // they don't re-pick it every session.
+  const WHISPER_MODEL_LS_KEY = 'trikklip.whisperModel';
+  let whisperModel =
+    (typeof localStorage !== 'undefined' && localStorage.getItem(WHISPER_MODEL_LS_KEY)) ||
+    'small';
+  $: if (typeof localStorage !== 'undefined' && whisperModel) {
+    localStorage.setItem(WHISPER_MODEL_LS_KEY, whisperModel);
+  }
   let maxClips = 10;
   let windowMinutes = 5;
   let paddingMinutes = 3.0;
-  let audioTrack = -1;
   let selectedLanguage = 'en';
 
   // Run mode: 0 = Full Pipeline, 1 = Transcribe Only, 2 = Analyze Only
@@ -47,15 +54,30 @@
     if (parent && stem) outputDir.set(`${parent}/${stem}_clips`);
   }
 
-  const whisperModels = ['tiny', 'base', 'small', 'medium', 'large'];
+  // Whisper model catalog — matches AVAILABLE_MODELS in whisper_models.rs.
+  // Missing models are auto-downloaded from HuggingFace on first use.
+  const whisperModels: { value: string; label: string }[] = [
+    { value: 'tiny', label: 'tiny (77 MB — fastest, lowest accuracy)' },
+    { value: 'tiny.en', label: 'tiny.en (77 MB — English-only, faster)' },
+    { value: 'base', label: 'base (147 MB — default, shipped with app)' },
+    { value: 'base.en', label: 'base.en (147 MB — English-only)' },
+    { value: 'small', label: 'small (488 MB — better at names/terms)' },
+    { value: 'small.en', label: 'small.en (488 MB — English-only sweet spot)' },
+    { value: 'medium', label: 'medium (1.5 GB — diminishing returns vs small)' },
+    { value: 'medium.en', label: 'medium.en (1.5 GB — English-only)' },
+    { value: 'large-v3', label: 'large-v3 (3 GB — highest accuracy, slowest)' },
+    { value: 'large-v3-turbo', label: 'large-v3-turbo (1.6 GB — near-large quality, 8× faster)' },
+  ];
 
   function onFileSelect(path: string) {
     mp4Path.set(path);
     if (path) {
       const stem = path.replace(/^.*[/\\]/, '').replace(/\.[^.]+$/, '');
       const baseDir = defaultBaseDir(path);
-      if (!saveTranscriptPath) saveTranscriptPath = `${baseDir}/${stem}_transcript.json`;
-      if (!outputJsonPath) outputJsonPath = `${baseDir}/${stem}_clips.json`;
+      // Always overwrite — a new file means the previous auto-filled paths
+      // are wrong. Users who want a custom path can edit after selecting.
+      saveTranscriptPath = `${baseDir}/${stem}_transcript.json`;
+      outputJsonPath = `${baseDir}/${stem}_clips.json`;
       // Extract target is a nested <stem>_clips subfolder so per-clip
       // subfolders don't clutter the top-level <stem> folder. Matches the
       // Python layout.
@@ -96,7 +118,7 @@
     pipelineRunning.set(true);
 
     const prompts = customPrompts.filter(p => p.trim() !== '');
-    const track = audioTrack === -1 ? undefined : audioTrack;
+    const track = $audioTrack === -1 ? undefined : $audioTrack;
 
     const body: Record<string, any> = {
       source_path: $mp4Path,
@@ -108,6 +130,8 @@
       padding_seconds: paddingMinutes * 60,
       custom_prompts: prompts,
       output_dir: $mp4Path ? defaultBaseDir($mp4Path) : '',
+      save_transcript_path: saveTranscriptPath || undefined,
+      output_json_path: outputJsonPath || undefined,
     };
 
     // Add provider info for modes that need analysis
@@ -190,8 +214,8 @@
       <label class="form-label">
         Whisper Model
         <select bind:value={whisperModel} disabled={$pipelineRunning}>
-          {#each whisperModels as model}
-            <option value={model}>{model}</option>
+          {#each whisperModels as m}
+            <option value={m.value}>{m.label}</option>
           {/each}
         </select>
       </label>
@@ -213,8 +237,8 @@
 
       <label class="form-label">
         Audio Track
-        <input type="number" bind:value={audioTrack} min={-1} max={20} disabled={$pipelineRunning} />
-        {#if audioTrack === -1}
+        <input type="number" bind:value={$audioTrack} min={-1} max={20} disabled={$pipelineRunning} />
+        {#if $audioTrack === -1}
           <span class="field-hint">auto</span>
         {/if}
       </label>
@@ -288,6 +312,21 @@
     <div class="progress-section">
       {#if $currentStage === 'hashing'}
         <ProgressBar label="Hashing file" value={$hashProgress} />
+      {:else if $currentStage === 'whisper_download'}
+        <ProgressBar
+          label={$whisperDownloadProgress.bytes_total > 0
+            ? `Downloading whisper model (${$whisperDownloadProgress.model}) — ${(
+                $whisperDownloadProgress.bytes_done /
+                1024 /
+                1024
+              ).toFixed(0)} / ${(
+                $whisperDownloadProgress.bytes_total /
+                1024 /
+                1024
+              ).toFixed(0)} MB`
+            : `Downloading whisper model (${$whisperDownloadProgress.model})…`}
+          value={$whisperDownloadProgress.percent}
+        />
       {:else if $currentStage === 'audio'}
         <ProgressBar label="Extracting audio" value={$audioProgress} />
       {:else if $currentStage === 'spikes'}

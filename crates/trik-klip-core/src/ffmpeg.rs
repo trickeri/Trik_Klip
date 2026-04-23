@@ -124,6 +124,7 @@ pub async fn extract_audio(
             .take()
             .context("failed to capture ffmpeg stderr")?;
 
+        let tx_outer = tx.clone();
         let tx = tx.clone();
         let total_us = total_duration_us.unwrap_or(1.0);
 
@@ -173,6 +174,12 @@ pub async fn extract_audio(
         if !status.success() {
             anyhow::bail!("ffmpeg audio extraction exited with status {}", status);
         }
+
+        // ffmpeg's last `out_time_us` line usually rounds to 99% and the
+        // finalize/flush step doesn't emit another progress update. Snap to
+        // 100% now that we know the process exited cleanly so the UI bar
+        // doesn't freeze at 99 while we move on to spike detection.
+        let _ = tx_outer.send(ProgressEvent::AudioExtraction { percent: 100 });
     } else {
         // No progress — spawn, race wait() against cancel, kill on cancel.
         let mut child = cmd.spawn().context("failed to spawn ffmpeg for audio extraction")?;
@@ -200,12 +207,17 @@ pub async fn extract_audio(
 }
 
 /// Extract a clip from a media file using stream copy for video and AAC for audio.
+///
+/// If `audio_track` is provided, ffmpeg is told to map the first video stream
+/// and the Nth audio stream — so clips carry the same track the user picked
+/// for transcription (e.g. the mic-only track on multi-track stream recordings).
 pub async fn extract_clip(
     ffmpeg_path: &str,
     mp4_path: &str,
     output_path: &str,
     clip_start: f64,
     duration: f64,
+    audio_track: Option<u32>,
     mut cancel_rx: Option<CancelRx>,
 ) -> Result<()> {
     info!(
@@ -213,22 +225,43 @@ pub async fn extract_clip(
         output_path,
         clip_start,
         duration,
+        audio_track = ?audio_track,
         "extracting clip"
     );
 
+    let mut args: Vec<String> = vec![
+        "-y".into(),
+        "-ss".into(),
+        format!("{:.2}", clip_start),
+        "-i".into(),
+        mp4_path.into(),
+        "-t".into(),
+        format!("{:.2}", duration),
+    ];
+
+    if let Some(track) = audio_track {
+        // Must explicitly map video too once we're mapping audio, otherwise
+        // ffmpeg's default stream selection stops picking up the video stream.
+        args.push("-map".into());
+        args.push("0:v:0".into());
+        args.push("-map".into());
+        args.push(format!("0:a:{}", track));
+    }
+
+    args.extend([
+        "-c:v".into(),
+        "copy".into(),
+        "-c:a".into(),
+        "aac".into(),
+        "-b:a".into(),
+        "192k".into(),
+        output_path.into(),
+    ]);
+
     let mut cmd = Command::new(ffmpeg_path);
-    cmd.args([
-        "-y",
-        "-ss", &format!("{:.2}", clip_start),
-        "-i", mp4_path,
-        "-t", &format!("{:.2}", duration),
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        output_path,
-    ])
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::piped());
+    cmd.args(&args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
     apply_creation_flags(&mut cmd);
 
     let mut child = cmd

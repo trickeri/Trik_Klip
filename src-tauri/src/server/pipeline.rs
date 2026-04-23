@@ -53,6 +53,22 @@ pub struct PipelineParams {
     pub overlap_minutes: f64,
     #[serde(default)]
     pub custom_prompts: Option<Vec<String>>,
+    /// Whisper model name selected in the UI (e.g. "small", "large-v3-turbo").
+    /// Resolved against shipped resources dir + data_dir/whisper_models/;
+    /// downloaded from HuggingFace if missing. If unset, uses the configured
+    /// default (usually the shipped base model).
+    #[serde(default)]
+    pub whisper_model: Option<String>,
+    /// Absolute path to write the full transcript JSON to. The UI's
+    /// "Save Transcript" field — matches the Python layout so users can reuse
+    /// transcripts across runs. Parent dirs are created. Silently skipped
+    /// when empty/absent.
+    #[serde(default)]
+    pub save_transcript_path: Option<String>,
+    /// Absolute path to write the found clips JSON to. The UI's "Output JSON"
+    /// field. Written only for Full Pipeline / Analyze Only (not Transcribe Only).
+    #[serde(default)]
+    pub output_json_path: Option<String>,
 }
 
 fn default_language() -> String {
@@ -83,6 +99,11 @@ pub struct ExtractParams {
     /// slices. Optional — if omitted, per-clip transcripts are skipped.
     #[serde(default)]
     pub segments: Vec<TranscriptSegment>,
+    /// Audio track index to carry into each extracted clip. When unset,
+    /// ffmpeg picks the default (first) audio stream — which is wrong for
+    /// multi-track recordings where the user wants the mic track.
+    #[serde(default)]
+    pub audio_track: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -200,60 +221,153 @@ fn check_cancel(cancel_rx: &mut watch::Receiver<bool>) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the whisper model path for a pipeline run.
+///
+/// If `selected` is None (or empty), returns the configured default
+/// `whisper_model_path` (usually the shipped ggml-base.bin). Otherwise,
+/// looks for `ggml-{selected}.bin` in the shipped resources dir first,
+/// then in `<data_dir>/whisper_models/`. Downloads from HuggingFace into
+/// the latter if missing, emitting WhisperDownload progress events.
+async fn resolve_whisper_model(
+    state: &Arc<AppState>,
+    selected: Option<&str>,
+    tx: &tokio::sync::broadcast::Sender<ProgressEvent>,
+    cancel_rx: &watch::Receiver<bool>,
+) -> Result<String> {
+    let name = match selected {
+        Some(s) if !s.trim().is_empty() => s.trim(),
+        _ => {
+            // No selection — use the configured default path verbatim.
+            return Ok(state.settings.whisper_model_path.clone());
+        }
+    };
+
+    let resources_dir = std::path::Path::new(&state.settings.resources_dir);
+    let data_dir = std::path::Path::new(&state.settings.data_dir);
+
+    let path = trik_klip_core::whisper_models::ensure_downloaded(
+        resources_dir,
+        data_dir,
+        name,
+        &state.http_client,
+        Some(tx),
+        Some(cancel_rx),
+    )
+    .await?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 // ---------------------------------------------------------------------------
 // File hashing
 // ---------------------------------------------------------------------------
 
+/// Fingerprint a media file for use as a transcript cache key.
+///
+/// Reads ~8 MB total (4 MB head + 4 MB tail) plus the file size, instead of
+/// streaming the entire multi-GB video through SHA-256. On spinning disks
+/// that turns a minutes-long stage into sub-second. Collision risk is
+/// negligible because size is part of the hash input and any two recordings
+/// with matching size + identical head + identical tail are effectively the
+/// same file. Small files (<= 2× sample) are hashed whole.
 async fn hash_file(
     path: &str,
     cancel_rx: &mut watch::Receiver<bool>,
     progress_tx: Option<&tokio::sync::broadcast::Sender<ProgressEvent>>,
 ) -> Result<String> {
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    const SAMPLE_BYTES: u64 = 4 * 1024 * 1024;
 
     let mut file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("Cannot open file for hashing: {}", path))?;
 
-    let total_bytes = file
-        .metadata()
-        .await
-        .ok()
-        .map(|m| m.len())
-        .filter(|&n| n > 0);
+    let size = file.metadata().await?.len();
 
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024]; // 1 MB chunks
-    let mut read_so_far: u64 = 0;
-    let mut last_percent: u8 = 0;
-
-    if progress_tx.is_some() && total_bytes.is_some() {
-        if let Some(tx) = progress_tx {
-            let _ = tx.send(ProgressEvent::Hashing { percent: 0 });
-        }
+    if let Some(tx) = progress_tx {
+        let _ = tx.send(ProgressEvent::Hashing { percent: 0 });
+    }
+    if *cancel_rx.borrow() {
+        anyhow::bail!("Pipeline cancelled by user");
     }
 
-    loop {
+    let mut hasher = Sha256::new();
+    // Include size so two files of different length can't collide even if
+    // head+tail happen to match (they won't, but belt + suspenders).
+    hasher.update(size.to_le_bytes());
+
+    if size <= 2 * SAMPLE_BYTES {
+        // Small enough to hash whole — skip the head/tail dance.
+        let mut buf = Vec::with_capacity(size as usize);
+        file.read_to_end(&mut buf).await?;
+        hasher.update(&buf);
+    } else {
+        let mut head = vec![0u8; SAMPLE_BYTES as usize];
+        file.read_exact(&mut head).await?;
+        hasher.update(&head);
+
         if *cancel_rx.borrow() {
             anyhow::bail!("Pipeline cancelled by user");
         }
-        let n = file.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        read_so_far += n as u64;
 
-        if let (Some(tx), Some(total)) = (progress_tx, total_bytes) {
-            let pct = ((read_so_far as f64 / total as f64) * 100.0).clamp(0.0, 100.0) as u8;
-            if pct != last_percent {
-                last_percent = pct;
-                let _ = tx.send(ProgressEvent::Hashing { percent: pct });
-            }
-        }
+        file.seek(std::io::SeekFrom::End(-(SAMPLE_BYTES as i64))).await?;
+        let mut tail = vec![0u8; SAMPLE_BYTES as usize];
+        file.read_exact(&mut tail).await?;
+        hasher.update(&tail);
+    }
+
+    if let Some(tx) = progress_tx {
+        let _ = tx.send(ProgressEvent::Hashing { percent: 100 });
     }
 
     Ok(hex::encode(hasher.finalize()))
+}
+
+// ---------------------------------------------------------------------------
+// Write a user-specified JSON sidecar (e.g. transcript JSON, clips JSON).
+// Creates the parent dir, pretty-prints the value, and emits a log event on
+// either success or failure — failures don't abort the pipeline since the
+// primary output (DB cache / extracted clips) is already persisted elsewhere.
+// ---------------------------------------------------------------------------
+
+async fn write_sidecar_json<T: serde::Serialize>(
+    path: Option<&str>,
+    value: &T,
+    label: &str,
+    tx: &tokio::sync::broadcast::Sender<ProgressEvent>,
+) {
+    let Some(path) = path.filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let result: Result<()> = async {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("create dir for {}", path))?;
+        }
+        let body = serde_json::to_string_pretty(value)?;
+        tokio::fs::write(path, body)
+            .await
+            .with_context(|| format!("write {}", path))?;
+        Ok(())
+    }
+    .await;
+
+    match result {
+        Ok(_) => {
+            let _ = tx.send(ProgressEvent::Log {
+                level: "info".into(),
+                message: format!("Saved {} to {}", label, path),
+            });
+        }
+        Err(e) => {
+            warn!(path, error = %e, "Failed to write {}", label);
+            let _ = tx.send(ProgressEvent::Log {
+                level: "warn".into(),
+                message: format!("Failed to save {} to {}: {}", label, path, e),
+            });
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -434,9 +548,16 @@ async fn run_full_pipeline_inner(
             level: "info".into(),
             message: "Transcribing audio...".into(),
         });
+        let model_path = resolve_whisper_model(
+            &state,
+            params.whisper_model.as_deref(),
+            tx,
+            &cancel_rx,
+        )
+        .await?;
         let segments = transcribe(
             &state.settings.whisper_cli_path,
-            &state.settings.whisper_model_path,
+            &model_path,
             &wav_path.to_string_lossy(),
             &params.language,
             Some(tx.clone()),
@@ -500,6 +621,16 @@ async fn run_full_pipeline_inner(
 
     let custom_prompts_ref = params.custom_prompts.as_deref();
 
+    // Save the transcript to the user-specified path before analysis — so
+    // even if the LLM step dies, the transcript is on disk.
+    write_sidecar_json(
+        params.save_transcript_path.as_deref(),
+        &segments,
+        "transcript",
+        tx,
+    )
+    .await;
+
     let clips = find_clips(
         &chunks,
         provider_arc,
@@ -510,6 +641,14 @@ async fn run_full_pipeline_inner(
         params.max_workers,
         custom_prompts_ref.map(|v| &v[..]),
         Some(tx),
+    )
+    .await;
+
+    write_sidecar_json(
+        params.output_json_path.as_deref(),
+        &clips,
+        "clips JSON",
+        tx,
     )
     .await;
 
@@ -576,6 +715,14 @@ async fn run_transcribe_only_inner(
             level: "info".into(),
             message: "Transcript already cached.".into(),
         });
+        // User may have asked for a fresh sidecar — write it even on cache hit.
+        write_sidecar_json(
+            params.save_transcript_path.as_deref(),
+            &segments,
+            "transcript",
+            tx,
+        )
+        .await;
         return Ok(TranscribeResult {
             transcript_hash: file_hash,
             segments,
@@ -609,9 +756,16 @@ async fn run_transcribe_only_inner(
     check_cancel(&mut cancel_rx)?;
 
     // Transcribe
+    let model_path = resolve_whisper_model(
+        &state,
+        params.whisper_model.as_deref(),
+        tx,
+        &cancel_rx,
+    )
+    .await?;
     let segments = transcribe(
         &state.settings.whisper_cli_path,
-        &state.settings.whisper_model_path,
+        &model_path,
         &wav_path.to_string_lossy(),
         &params.language,
         Some(tx.clone()),
@@ -641,6 +795,14 @@ async fn run_transcribe_only_inner(
         created_at: String::new(),
     };
     db::save_transcript(&state.db, &row).await?;
+
+    write_sidecar_json(
+        params.save_transcript_path.as_deref(),
+        &segments,
+        "transcript",
+        tx,
+    )
+    .await;
 
     Ok(TranscribeResult {
         transcript_hash: file_hash,
@@ -890,6 +1052,7 @@ async fn run_extract_clips_inner(
             &clip_path.to_string_lossy(),
             clip.clip_start,
             duration,
+            params.audio_track,
             Some(cancel_rx.clone()),
         )
         .await?;

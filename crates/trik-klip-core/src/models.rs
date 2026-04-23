@@ -41,6 +41,12 @@ pub struct AnalysisChunk {
 #[serde(tag = "type")]
 pub enum ProgressEvent {
     Hashing { percent: u8 },
+    WhisperDownload {
+        model: String,
+        percent: u8,
+        bytes_done: u64,
+        bytes_total: u64,
+    },
     AudioExtraction { percent: u8 },
     SpikeDetection { spike_count: usize },
     Transcription { percent: u8, label: String },

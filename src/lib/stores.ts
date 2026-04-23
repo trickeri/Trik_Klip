@@ -7,6 +7,12 @@ export const currentStage = writable('');
 
 // Progress
 export const hashProgress = writable(0);
+export const whisperDownloadProgress = writable({
+  model: '',
+  percent: 0,
+  bytes_done: 0,
+  bytes_total: 0,
+});
 export const audioProgress = writable(0);
 export const transcriptionProgress = writable(0);
 export const transcriptionLabel = writable('');
@@ -23,6 +29,11 @@ export const clips = writable<ClipSuggestion[]>([]);
 export const mp4Path = writable('');
 export const outputDir = writable('');
 export const transcriptSegments = writable<TranscriptSegment[]>([]);
+
+// Audio track index selected in Transcribe — shared with Extract so clip
+// MP4s carry the same track the user transcribed against (e.g. the mic
+// track on multi-track stream recordings). -1 means "let ffmpeg pick".
+export const audioTrack = writable<number>(-1);
 
 // Log messages
 export const logMessages = writable<Array<{ level: string; message: string; timestamp: string }>>([]);
@@ -43,6 +54,7 @@ export function addLog(level: string, message: string) {
 // Reset progress state
 export function resetProgress() {
     hashProgress.set(0);
+    whisperDownloadProgress.set({ model: '', percent: 0, bytes_done: 0, bytes_total: 0 });
     audioProgress.set(0);
     transcriptionProgress.set(0);
     transcriptionLabel.set('');

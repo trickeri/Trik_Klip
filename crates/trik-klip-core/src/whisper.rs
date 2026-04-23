@@ -35,6 +35,28 @@ struct WhisperTimestamps {
 // Timestamp parsing
 // ---------------------------------------------------------------------------
 
+/// Parse whisper-cli's stdout segment timestamp to seconds. Accepts both
+/// `HH:MM:SS.sss` (long files) and `MM:SS.sss` (short files), with `,` or
+/// `.` as the fractional separator. Returns None on any parse error.
+fn parse_flex_ts(ts: &str) -> Option<f64> {
+    let normalised = ts.replace(',', ".");
+    let parts: Vec<&str> = normalised.split(':').collect();
+    match parts.len() {
+        3 => {
+            let h: f64 = parts[0].parse().ok()?;
+            let m: f64 = parts[1].parse().ok()?;
+            let s: f64 = parts[2].parse().ok()?;
+            Some(h * 3600.0 + m * 60.0 + s)
+        }
+        2 => {
+            let m: f64 = parts[0].parse().ok()?;
+            let s: f64 = parts[1].parse().ok()?;
+            Some(m * 60.0 + s)
+        }
+        _ => None,
+    }
+}
+
 /// Parse a whisper-cli timestamp (`HH:MM:SS,mmm` or `HH:MM:SS.mmm`) to seconds.
 pub fn parse_whisper_timestamp(ts: &str) -> anyhow::Result<f64> {
     // Accept both comma and period as the fractional separator.
@@ -82,12 +104,41 @@ pub async fn transcribe(
         "Starting whisper-cli transcription"
     );
 
-    // Build the command. We intentionally omit --no-prints so that whisper-cli
-    // writes progress lines to stderr that we can parse.
-    let mut cmd = Command::new(whisper_cli_path);
-    cmd.args(["-m", model_path, "-f", wav_path, "-l", language, "--output-json"]);
+    // Read WAV duration up front. whisper-cli prints each transcribed
+    // segment as a line on stdout (e.g. "[00:12:34.000 --> 00:12:39.500]  …")
+    // — dividing the end-timestamp of each segment by the WAV duration gives
+    // us a smooth progress percentage. whisper-cli's own `--print-progress`
+    // output on stderr only fires at 5% steps, which is why the bar used to
+    // jump in chunks and not appear at all until the first 5% tick.
+    let total_sec: f64 = {
+        let path = wav_path.to_string();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<f64> {
+            let reader = hound::WavReader::open(&path)?;
+            let spec = reader.spec();
+            let samples = reader.duration() as f64;
+            Ok(samples / spec.sample_rate as f64)
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or(0.0)
+    };
 
-    // Pipe stderr for progress; stdout is unused but pipe it to avoid blocking.
+    // Build the command. --print-progress keeps the stderr 5%-step fallback
+    // around in case stdout parsing misses anything.
+    let mut cmd = Command::new(whisper_cli_path);
+    cmd.args([
+        "-m", model_path,
+        "-f", wav_path,
+        "-l", language,
+        "--output-json",
+        "--print-progress",
+    ]);
+
+    // Both pipes MUST be drained. Piping stdout without draining deadlocks
+    // whisper-cli on long files (the ~64 KB Windows pipe buffer fills up and
+    // the process blocks on every segment write). We spawn a reader task for
+    // each below.
     cmd.stderr(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
 
@@ -104,9 +155,9 @@ pub async fn transcribe(
         .spawn()
         .with_context(|| format!("Failed to spawn whisper-cli at '{}'", whisper_cli_path))?;
 
-    // ---------- stream stderr for progress ----------
+    // ---------- stream stderr for the 5%-step progress fallback ----------
     let stderr = child.stderr.take().expect("stderr was piped");
-    let progress_handle = {
+    let stderr_handle = {
         let tx = progress_tx.clone();
         tokio::spawn(async move {
             let reader = BufReader::new(stderr);
@@ -119,10 +170,50 @@ pub async fn transcribe(
                     if let Ok(pct) = caps[1].parse::<u8>() {
                         if let Some(ref tx) = tx {
                             let _ = tx.send(ProgressEvent::Transcription {
-                                percent: pct,
-                                label: format!("Transcribing… {}%", pct),
+                                percent: pct.min(99),
+                                label: format!("Transcribing… {}%", pct.min(99)),
                             });
                         }
+                    }
+                }
+            }
+        })
+    };
+
+    // ---------- stream stdout for smooth per-segment progress ----------
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let stdout_handle = {
+        let tx = progress_tx.clone();
+        tokio::spawn(async move {
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+            // Match the END timestamp of `[HH:MM:SS.sss --> HH:MM:SS.sss]`.
+            // Short files may omit the HH segment, so accept both forms.
+            let ts_re = Regex::new(
+                r"-->\s+(\d+:\d+(?::\d+)?\.\d+)\]",
+            )
+            .expect("valid regex");
+            let mut last_percent: u8 = 0;
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                if total_sec <= 0.0 {
+                    continue;
+                }
+                let Some(caps) = ts_re.captures(&line) else {
+                    continue;
+                };
+                let Some(end_ts) = caps.get(1).and_then(|m| parse_flex_ts(m.as_str()))
+                else {
+                    continue;
+                };
+                let pct = ((end_ts / total_sec) * 100.0).clamp(0.0, 99.0) as u8;
+                if pct != last_percent {
+                    last_percent = pct;
+                    if let Some(ref tx) = tx {
+                        let _ = tx.send(ProgressEvent::Transcription {
+                            percent: pct,
+                            label: format!("Transcribing… {}%", pct),
+                        });
                     }
                 }
             }
@@ -134,17 +225,29 @@ pub async fn transcribe(
         s = child.wait() => s.context("Failed to wait on whisper-cli process")?,
         _ = wait_cancelled(cancel_rx.as_mut()) => {
             let _ = child.kill().await;
-            let _ = progress_handle.await;
+            let _ = stderr_handle.await;
+            let _ = stdout_handle.await;
             bail!("Pipeline cancelled by user");
         }
     };
 
-    // Make sure the progress reader finishes.
-    let _ = progress_handle.await;
+    // Make sure both readers finish.
+    let _ = stderr_handle.await;
+    let _ = stdout_handle.await;
 
     if !status.success() {
         let code = status.code().unwrap_or(-1);
         bail!("whisper-cli exited with code {}", code);
+    }
+
+    // Snap the bar to 100% — the last timestamp line usually lands in the
+    // high 90s, and whisper-cli's "progress = 100%" emission sometimes loses
+    // the race with process exit.
+    if let Some(ref tx) = progress_tx {
+        let _ = tx.send(ProgressEvent::Transcription {
+            percent: 100,
+            label: "Transcribing… 100%".into(),
+        });
     }
 
     info!("whisper-cli finished successfully");

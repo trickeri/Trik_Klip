@@ -3,6 +3,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub data_dir: String,
+    pub resources_dir: String,
     pub database_url: String,
     pub api_port: u16,
     pub ffmpeg_path: String,
@@ -41,6 +42,7 @@ impl Settings {
 
         Ok(Settings {
             data_dir,
+            resources_dir: resources_dir.to_string_lossy().into_owned(),
             database_url,
             api_port: env_or("API_PORT", "31416").parse().unwrap_or(31416),
             ffmpeg_path: env_or("FFMPEG_PATH", "ffmpeg"),

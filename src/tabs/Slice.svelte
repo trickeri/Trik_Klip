@@ -2,7 +2,7 @@
   import ProgressBar from '../components/ProgressBar.svelte';
   import {
     pipelineRunning, outputDir, activeProfile, currentStage,
-    sliceProgress, visualProgress,
+    sliceProgress, visualProgress, activeTab,
     addLog, resetProgress,
   } from '../lib/stores';
   import { apiFetch } from '../lib/api';
@@ -12,6 +12,7 @@
     path: string;
     has_edit_plan: boolean;
     slice_count: number;
+    has_premiere_project: boolean;
   }
 
   // State for the parent clip directory + per-clip rows.
@@ -26,16 +27,26 @@
   let busy: Record<string, boolean> = {};
 
   // Pick up the shared output dir so the Slice tab opens pointing at the
-  // folder Extract just wrote to.
+  // folder Extract just wrote to. Updates whenever outputDir changes to a
+  // new value — a new file drop in Transcribe must not leave Slice stuck on
+  // the previous session's folder. User edits to clipDir persist until the
+  // next file drop.
   outputDir.subscribe(v => {
-    if (v && !clipDir) {
+    if (v && v !== clipDir) {
       clipDir = v;
-      refresh();
     }
   });
 
   $: if (clipDir) {
     // Re-scan whenever the clipDir changes (e.g. user types/browses).
+    refresh();
+  }
+
+  // Slice stays mounted while tabs switch (App.svelte hides via CSS), so the
+  // reactive above doesn't re-fire when we come back here after Extract has
+  // just written the folder. Trigger a fresh scan whenever this tab becomes
+  // active — the folder listing is cheap.
+  $: if ($activeTab === 2 && clipDir) {
     refresh();
   }
 
@@ -238,6 +249,9 @@
             {#if entry.has_edit_plan}
               <span class="badge muted">edit plan present</span>
             {/if}
+            {#if entry.has_premiere_project}
+              <span class="badge premiere" title="Premiere project (.prproj) present in this folder">Pr</span>
+            {/if}
             <button
               class="remove-btn"
               title="Remove from list"
@@ -405,6 +419,15 @@
 
   .badge.muted {
     background: color-mix(in srgb, var(--dim) 20%, transparent);
+  }
+
+  /* Adobe Premiere signature purple — distinct from our accent so it reads
+     as an app-specific indicator rather than a UI state. */
+  .badge.premiere {
+    background: #2a0a4a;
+    color: #e7c6ff;
+    font-weight: 700;
+    letter-spacing: 0.5px;
   }
 
   .remove-btn {

@@ -3,7 +3,7 @@
   import ClipCard from '../components/ClipCard.svelte';
   import {
     mp4Path, outputDir, clips, transcriptSegments, pipelineRunning, currentStage,
-    extractionProgress,
+    extractionProgress, audioTrack,
     addLog, resetProgress,
   } from '../lib/stores';
   import { apiFetch } from '../lib/api';
@@ -82,6 +82,9 @@
           source_path: $mp4Path,
           clips: selected,
           output_dir: $outputDir || outDir || undefined,
+          // Same audio track the user picked for Transcribe — otherwise
+          // multi-track recordings get the wrong (default) audio in clips.
+          audio_track: $audioTrack === -1 ? undefined : $audioTrack,
           // Forwarding segments lets the backend write per-clip transcript
           // slices without re-hashing the multi-GB source file.
           segments: $transcriptSegments,

@@ -116,6 +116,8 @@ enum Commands {
         output_dir: PathBuf,
         #[arg(long)]
         transcript: Option<PathBuf>,
+        #[arg(long)]
+        audio_track: Option<u32>,
     },
     /// Generate editing slices from an extracted clip
     GenerateSlices {
@@ -454,6 +456,7 @@ async fn run_command(cli: Cli) -> Result<()> {
             clips_json,
             output_dir,
             transcript,
+            audio_track,
         } => {
             let clips: Vec<ClipSuggestion> = read_json_file(&clips_json)?;
             let mp4_str = mp4_file.to_string_lossy().to_string();
@@ -487,6 +490,7 @@ async fn run_command(cli: Cli) -> Result<()> {
                     &clip_mp4.to_string_lossy(),
                     clip.clip_start,
                     duration,
+                    audio_track,
                     None,
                 )
                 .await?;
@@ -878,6 +882,7 @@ async fn run_command(cli: Cli) -> Result<()> {
                     &clip_mp4.to_string_lossy(),
                     clip.clip_start,
                     duration,
+                    audio_track,
                     None,
                 )
                 .await?;

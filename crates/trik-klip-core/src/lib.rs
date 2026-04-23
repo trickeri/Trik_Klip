@@ -2,6 +2,7 @@ pub mod models;
 pub mod cancel;
 pub mod ffmpeg;
 pub mod whisper;
+pub mod whisper_models;
 pub mod spike_detection;
 pub mod chunking;
 pub mod llm;

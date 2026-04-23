@@ -184,6 +184,7 @@ struct ClipFolderEntry {
     path: String,
     has_edit_plan: bool,
     slice_count: usize,
+    has_premiere_project: bool,
 }
 
 async fn list_clip_folders(
@@ -210,6 +211,7 @@ async fn list_clip_folders(
         let mut has_clip_mp4 = false;
         let mut slice_count = 0usize;
         let mut has_edit_plan = false;
+        let mut has_premiere_project = false;
         if let Ok(children) = std::fs::read_dir(&path) {
             for child in children.flatten() {
                 let p = child.path();
@@ -226,6 +228,8 @@ async fn list_clip_folders(
                     }
                 } else if ext == "txt" && stem.ends_with("_edit_plan") {
                     has_edit_plan = true;
+                } else if ext == "prproj" {
+                    has_premiere_project = true;
                 }
             }
         }
@@ -240,6 +244,7 @@ async fn list_clip_folders(
                 path: path.to_string_lossy().into_owned(),
                 has_edit_plan,
                 slice_count,
+                has_premiere_project,
             });
         }
     }
@@ -249,6 +254,7 @@ async fn list_clip_folders(
         let mut has_clip_mp4 = false;
         let mut slice_count = 0usize;
         let mut has_edit_plan = false;
+        let mut has_premiere_project = false;
         if let Ok(children) = std::fs::read_dir(root) {
             for child in children.flatten() {
                 let p = child.path();
@@ -265,6 +271,8 @@ async fn list_clip_folders(
                     }
                 } else if ext == "txt" && stem.ends_with("_edit_plan") {
                     has_edit_plan = true;
+                } else if ext == "prproj" {
+                    has_premiere_project = true;
                 }
             }
         }
@@ -278,6 +286,7 @@ async fn list_clip_folders(
                 path: root.to_string_lossy().into_owned(),
                 has_edit_plan,
                 slice_count,
+                has_premiere_project,
             });
         }
     }
