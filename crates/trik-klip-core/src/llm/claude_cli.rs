@@ -59,7 +59,18 @@ impl std::error::Error for CliError {}
 // ---------------------------------------------------------------------------
 
 fn which(name: &str) -> Option<String> {
-    let output = std::process::Command::new("where").arg(name).output().ok()?;
+    let mut cmd = std::process::Command::new("where");
+    cmd.arg(name);
+    // Without CREATE_NO_WINDOW, each `where.exe` invocation flashes a console
+    // window that steals focus — and analysis spawns this per chunk per
+    // worker. Suppress the window.
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -72,7 +83,7 @@ fn which(name: &str) -> Option<String> {
     }
 }
 
-fn find_claude() -> Option<String> {
+fn find_claude_uncached() -> Option<String> {
     // Prefer claude.exe if it's on PATH (rare — usually npm only installs .cmd).
     if let Some(p) = which("claude.exe") {
         return Some(p);
@@ -101,6 +112,15 @@ fn find_claude() -> Option<String> {
 
     // Last-resort unix-style name.
     which("claude")
+}
+
+/// Cached claude path resolution. Without this we spawned `where.exe` per
+/// LLM call — a few hundred subprocess spawns per analysis, each a flashing
+/// console window on Windows. Cache is `None` if the CLI genuinely isn't
+/// installed; caller will surface `CliError::NotFound`.
+fn find_claude() -> Option<String> {
+    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(find_claude_uncached).clone()
 }
 
 /// Check whether the Claude CLI is available on PATH.
