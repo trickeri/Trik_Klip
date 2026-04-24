@@ -327,6 +327,7 @@ async fn run_command(cli: Cli) -> Result<()> {
                 &language,
                 None,
                 None,
+                None,
             )
             .await?;
 
@@ -804,6 +805,7 @@ async fn run_command(cli: Cli) -> Result<()> {
                 &cli.model_path,
                 &wav_str,
                 &language,
+                None,
                 None,
                 None,
             )

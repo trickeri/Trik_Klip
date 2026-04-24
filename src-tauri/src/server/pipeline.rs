@@ -6,13 +6,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::warn;
 
 use trik_klip_core::chunking::{annotate_chunks_with_spikes, chunk_transcript};
 use trik_klip_core::clip_scoring::find_clips;
-use trik_klip_core::db::{self, models::TranscriptRow};
+use trik_klip_core::db;
 use trik_klip_core::ffmpeg::{extract_audio, extract_clip, extract_slice, get_duration};
 use trik_klip_core::llm::make_provider;
 use trik_klip_core::models::*;
@@ -258,72 +257,6 @@ async fn resolve_whisper_model(
 }
 
 // ---------------------------------------------------------------------------
-// File hashing
-// ---------------------------------------------------------------------------
-
-/// Fingerprint a media file for use as a transcript cache key.
-///
-/// Reads ~8 MB total (4 MB head + 4 MB tail) plus the file size, instead of
-/// streaming the entire multi-GB video through SHA-256. On spinning disks
-/// that turns a minutes-long stage into sub-second. Collision risk is
-/// negligible because size is part of the hash input and any two recordings
-/// with matching size + identical head + identical tail are effectively the
-/// same file. Small files (<= 2× sample) are hashed whole.
-async fn hash_file(
-    path: &str,
-    cancel_rx: &mut watch::Receiver<bool>,
-    progress_tx: Option<&tokio::sync::broadcast::Sender<ProgressEvent>>,
-) -> Result<String> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
-    const SAMPLE_BYTES: u64 = 4 * 1024 * 1024;
-
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .with_context(|| format!("Cannot open file for hashing: {}", path))?;
-
-    let size = file.metadata().await?.len();
-
-    if let Some(tx) = progress_tx {
-        let _ = tx.send(ProgressEvent::Hashing { percent: 0 });
-    }
-    if *cancel_rx.borrow() {
-        anyhow::bail!("Pipeline cancelled by user");
-    }
-
-    let mut hasher = Sha256::new();
-    // Include size so two files of different length can't collide even if
-    // head+tail happen to match (they won't, but belt + suspenders).
-    hasher.update(size.to_le_bytes());
-
-    if size <= 2 * SAMPLE_BYTES {
-        // Small enough to hash whole — skip the head/tail dance.
-        let mut buf = Vec::with_capacity(size as usize);
-        file.read_to_end(&mut buf).await?;
-        hasher.update(&buf);
-    } else {
-        let mut head = vec![0u8; SAMPLE_BYTES as usize];
-        file.read_exact(&mut head).await?;
-        hasher.update(&head);
-
-        if *cancel_rx.borrow() {
-            anyhow::bail!("Pipeline cancelled by user");
-        }
-
-        file.seek(std::io::SeekFrom::End(-(SAMPLE_BYTES as i64))).await?;
-        let mut tail = vec![0u8; SAMPLE_BYTES as usize];
-        file.read_exact(&mut tail).await?;
-        hasher.update(&tail);
-    }
-
-    if let Some(tx) = progress_tx {
-        let _ = tx.send(ProgressEvent::Hashing { percent: 100 });
-    }
-
-    Ok(hex::encode(hasher.finalize()))
-}
-
-// ---------------------------------------------------------------------------
 // Write a user-specified JSON sidecar (e.g. transcript JSON, clips JSON).
 // Creates the parent dir, pretty-prints the value, and emits a log event on
 // either success or failure — failures don't abort the pipeline since the
@@ -365,6 +298,70 @@ async fn write_sidecar_json<T: serde::Serialize>(
             let _ = tx.send(ProgressEvent::Log {
                 level: "warn".into(),
                 message: format!("Failed to save {} to {}: {}", label, path, e),
+            });
+        }
+    }
+}
+
+/// Resolve the bundled Silero VAD model path, returning None if the file
+/// is missing (e.g. on a pre-VAD install that updated in place). whisper-cli
+/// then runs without VAD — still works, just back to the old hallucination
+/// behavior on long silent stretches.
+fn resolve_vad_model(state: &Arc<AppState>) -> Option<String> {
+    let p = std::path::Path::new(&state.settings.resources_dir)
+        .join("ggml-silero-v5.1.2.bin");
+    if p.exists() {
+        Some(p.to_string_lossy().into_owned())
+    } else {
+        None
+    }
+}
+
+/// Copy the WAV that whisper actually transcribed into the user's output
+/// folder (next to their transcript JSON), named after the source video.
+/// Lets the user listen back when a transcript looks suspicious — a common
+/// root cause is picking the wrong audio_track index, and the telltale
+/// whisper hallucination (`"Thank you. Thank you. Thank you."` loop) is
+/// hard to diagnose without the raw audio to compare against.
+async fn copy_audio_sidecar(
+    wav_path: &str,
+    save_transcript_path: Option<&str>,
+    source_path: &str,
+    tx: &tokio::sync::broadcast::Sender<ProgressEvent>,
+) {
+    let Some(transcript_path) = save_transcript_path.filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let Some(parent) = std::path::Path::new(transcript_path).parent() else {
+        return;
+    };
+    let stem = std::path::Path::new(source_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("audio");
+    let dest = parent.join(format!("{}_audio.wav", stem));
+
+    if let Err(e) = tokio::fs::create_dir_all(parent).await {
+        warn!(path = %parent.display(), error = %e, "Could not create audio sidecar parent");
+        return;
+    }
+
+    match tokio::fs::copy(wav_path, &dest).await {
+        Ok(bytes) => {
+            let _ = tx.send(ProgressEvent::Log {
+                level: "info".into(),
+                message: format!(
+                    "Saved audio to {} ({} MB)",
+                    dest.display(),
+                    bytes / (1024 * 1024)
+                ),
+            });
+        }
+        Err(e) => {
+            warn!(path = %dest.display(), error = %e, "Failed to copy audio sidecar");
+            let _ = tx.send(ProgressEvent::Log {
+                level: "warn".into(),
+                message: format!("Failed to save audio to {}: {}", dest.display(), e),
             });
         }
     }
@@ -467,131 +464,66 @@ async fn run_full_pipeline_inner(
     let mut cancel_rx = state.cancel_tx.subscribe();
     let tx = &state.progress_tx;
 
-    // 2. Hash source file and check transcript cache
+    // Extract audio
+    let wav_path = temp_wav_path(&state, &params.source_path);
+    std::fs::create_dir_all(wav_path.parent().unwrap())?;
+
     let _ = tx.send(ProgressEvent::Log {
         level: "info".into(),
-        message: "Computing file hash...".into(),
+        message: "Extracting audio...".into(),
     });
-    let file_hash = hash_file(&params.source_path, &mut cancel_rx, Some(tx)).await?;
+    extract_audio(
+        &state.settings.ffmpeg_path,
+        &state.settings.ffprobe_path,
+        &params.source_path,
+        &wav_path.to_string_lossy(),
+        params.audio_track,
+        Some(tx.clone()),
+        Some(cancel_rx.clone()),
+    )
+    .await?;
     check_cancel(&mut cancel_rx)?;
 
-    // Check for cached transcript
-    let cached = db::get_transcript_by_hash(&state.db, &file_hash).await?;
+    // Spike detection
+    let _ = tx.send(ProgressEvent::Log {
+        level: "info".into(),
+        message: "Detecting volume spikes...".into(),
+    });
+    let wp = wav_path.to_string_lossy().to_string();
+    let spikes =
+        tokio::task::spawn_blocking(move || detect_volume_spikes_default(&wp)).await??;
+    let _ = tx.send(ProgressEvent::SpikeDetection {
+        spike_count: spikes.len(),
+    });
+    check_cancel(&mut cancel_rx)?;
 
-    let (segments, duration, spikes) = if let Some(row) = cached {
-        info!("Using cached transcript for hash {}", file_hash);
-        let _ = tx.send(ProgressEvent::Log {
-            level: "info".into(),
-            message: "Found cached transcript, skipping extraction and transcription.".into(),
-        });
-        let segments: Vec<TranscriptSegment> = serde_json::from_str(&row.segments_json)?;
-        // We still need spikes for annotation — re-detect or skip if WAV is gone
-        let wav_path = temp_wav_path(&state, &params.source_path);
-        let spikes = if wav_path.exists() {
-            let wp = wav_path.to_string_lossy().to_string();
-            tokio::task::spawn_blocking(move || detect_volume_spikes_default(&wp))
-                .await??
-        } else {
-            // Need to re-extract audio for spike detection
-            std::fs::create_dir_all(wav_path.parent().unwrap())?;
-            extract_audio(
-                &state.settings.ffmpeg_path,
-                &state.settings.ffprobe_path,
-                &params.source_path,
-                &wav_path.to_string_lossy(),
-                params.audio_track,
-                Some(tx.clone()),
-                Some(cancel_rx.clone()),
-            )
-            .await?;
-            let wp = wav_path.to_string_lossy().to_string();
-            tokio::task::spawn_blocking(move || detect_volume_spikes_default(&wp))
-                .await??
-        };
-        (segments, row.duration_seconds, spikes)
-    } else {
-        // 3. Extract audio
-        let wav_path = temp_wav_path(&state, &params.source_path);
-        std::fs::create_dir_all(wav_path.parent().unwrap())?;
+    // Transcribe
+    let _ = tx.send(ProgressEvent::Log {
+        level: "info".into(),
+        message: "Transcribing audio...".into(),
+    });
+    let model_path = resolve_whisper_model(
+        &state,
+        params.whisper_model.as_deref(),
+        tx,
+        &cancel_rx,
+    )
+    .await?;
+    let vad_model = resolve_vad_model(&state);
+    let segments = transcribe(
+        &state.settings.whisper_cli_path,
+        &model_path,
+        &wav_path.to_string_lossy(),
+        &params.language,
+        vad_model.as_deref(),
+        Some(tx.clone()),
+        Some(cancel_rx.clone()),
+    )
+    .await?;
+    check_cancel(&mut cancel_rx)?;
 
-        let _ = tx.send(ProgressEvent::Log {
-            level: "info".into(),
-            message: "Extracting audio...".into(),
-        });
-        extract_audio(
-            &state.settings.ffmpeg_path,
-            &state.settings.ffprobe_path,
-            &params.source_path,
-            &wav_path.to_string_lossy(),
-            params.audio_track,
-            Some(tx.clone()),
-            Some(cancel_rx.clone()),
-        )
-        .await?;
-        check_cancel(&mut cancel_rx)?;
-
-        // 4. Spike detection
-        let _ = tx.send(ProgressEvent::Log {
-            level: "info".into(),
-            message: "Detecting volume spikes...".into(),
-        });
-        let wp = wav_path.to_string_lossy().to_string();
-        let spikes =
-            tokio::task::spawn_blocking(move || detect_volume_spikes_default(&wp)).await??;
-        let _ = tx.send(ProgressEvent::SpikeDetection {
-            spike_count: spikes.len(),
-        });
-        check_cancel(&mut cancel_rx)?;
-
-        // 5. Transcribe
-        let _ = tx.send(ProgressEvent::Log {
-            level: "info".into(),
-            message: "Transcribing audio...".into(),
-        });
-        let model_path = resolve_whisper_model(
-            &state,
-            params.whisper_model.as_deref(),
-            tx,
-            &cancel_rx,
-        )
-        .await?;
-        let segments = transcribe(
-            &state.settings.whisper_cli_path,
-            &model_path,
-            &wav_path.to_string_lossy(),
-            &params.language,
-            Some(tx.clone()),
-            Some(cancel_rx.clone()),
-        )
-        .await?;
-        check_cancel(&mut cancel_rx)?;
-
-        // Get duration
-        let duration =
-            get_duration(&state.settings.ffprobe_path, &params.source_path).await?;
-
-        // 6. Cache transcript
-        let segments_json = serde_json::to_string(&segments)?;
-        let row = TranscriptRow {
-            id: String::new(),
-            file_hash: file_hash.clone(),
-            source_path: params.source_path.clone(),
-            segments_json,
-            duration_seconds: duration,
-            whisper_model: state
-                .settings
-                .whisper_model_path
-                .split(['/', '\\'])
-                .last()
-                .unwrap_or("unknown")
-                .to_string(),
-            language: params.language.clone(),
-            created_at: String::new(),
-        };
-        db::save_transcript(&state.db, &row).await?;
-
-        (segments, duration, spikes)
-    };
+    // Get duration
+    let duration = get_duration(&state.settings.ffprobe_path, &params.source_path).await?;
 
     check_cancel(&mut cancel_rx)?;
 
@@ -631,6 +563,18 @@ async fn run_full_pipeline_inner(
     )
     .await;
 
+    // Drop the raw WAV next to the transcript for offline verification.
+    let wav_path_str = temp_wav_path(&state, &params.source_path)
+        .to_string_lossy()
+        .into_owned();
+    copy_audio_sidecar(
+        &wav_path_str,
+        params.save_transcript_path.as_deref(),
+        &params.source_path,
+        tx,
+    )
+    .await;
+
     let clips = find_clips(
         &chunks,
         provider_arc,
@@ -654,7 +598,7 @@ async fn run_full_pipeline_inner(
 
     Ok(PipelineResult {
         clips,
-        transcript_hash: file_hash,
+        transcript_hash: String::new(),
         duration_seconds: duration,
         segments,
     })
@@ -705,32 +649,6 @@ async fn run_transcribe_only_inner(
     let mut cancel_rx = state.cancel_tx.subscribe();
     let tx = &state.progress_tx;
 
-    let file_hash = hash_file(&params.source_path, &mut cancel_rx, Some(tx)).await?;
-    check_cancel(&mut cancel_rx)?;
-
-    // Check cache
-    if let Some(row) = db::get_transcript_by_hash(&state.db, &file_hash).await? {
-        let segments: Vec<TranscriptSegment> = serde_json::from_str(&row.segments_json)?;
-        let _ = tx.send(ProgressEvent::Log {
-            level: "info".into(),
-            message: "Transcript already cached.".into(),
-        });
-        // User may have asked for a fresh sidecar — write it even on cache hit.
-        write_sidecar_json(
-            params.save_transcript_path.as_deref(),
-            &segments,
-            "transcript",
-            tx,
-        )
-        .await;
-        return Ok(TranscribeResult {
-            transcript_hash: file_hash,
-            segments,
-            duration_seconds: row.duration_seconds,
-            spike_count: 0,
-        });
-    }
-
     // Extract audio
     let wav_path = temp_wav_path(&state, &params.source_path);
     std::fs::create_dir_all(wav_path.parent().unwrap())?;
@@ -763,11 +681,13 @@ async fn run_transcribe_only_inner(
         &cancel_rx,
     )
     .await?;
+    let vad_model = resolve_vad_model(&state);
     let segments = transcribe(
         &state.settings.whisper_cli_path,
         &model_path,
         &wav_path.to_string_lossy(),
         &params.language,
+        vad_model.as_deref(),
         Some(tx.clone()),
         Some(cancel_rx.clone()),
     )
@@ -775,26 +695,6 @@ async fn run_transcribe_only_inner(
     check_cancel(&mut cancel_rx)?;
 
     let duration = get_duration(&state.settings.ffprobe_path, &params.source_path).await?;
-
-    // Cache
-    let segments_json = serde_json::to_string(&segments)?;
-    let row = TranscriptRow {
-        id: String::new(),
-        file_hash: file_hash.clone(),
-        source_path: params.source_path.clone(),
-        segments_json,
-        duration_seconds: duration,
-        whisper_model: state
-            .settings
-            .whisper_model_path
-            .split(['/', '\\'])
-            .last()
-            .unwrap_or("unknown")
-            .to_string(),
-        language: params.language.clone(),
-        created_at: String::new(),
-    };
-    db::save_transcript(&state.db, &row).await?;
 
     write_sidecar_json(
         params.save_transcript_path.as_deref(),
@@ -804,8 +704,16 @@ async fn run_transcribe_only_inner(
     )
     .await;
 
+    copy_audio_sidecar(
+        &wav_path.to_string_lossy(),
+        params.save_transcript_path.as_deref(),
+        &params.source_path,
+        tx,
+    )
+    .await;
+
     Ok(TranscribeResult {
-        transcript_hash: file_hash,
+        transcript_hash: String::new(),
         segments,
         duration_seconds: duration,
         spike_count: spikes.len(),

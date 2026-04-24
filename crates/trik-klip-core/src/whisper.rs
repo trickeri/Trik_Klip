@@ -87,12 +87,18 @@ pub fn parse_whisper_timestamp(ts: &str) -> anyhow::Result<f64> {
 /// `model_path`       — path to the GGML model file.
 /// `wav_path`         — path to the 16-kHz mono WAV to transcribe.
 /// `language`         — BCP-47 language code (e.g. "en").
+/// `vad_model_path`   — optional Silero VAD model. When set, whisper-cli
+///                      skips silent regions — critical for stream
+///                      recordings with long gaps between speech where
+///                      whisper hallucinates `"Thank you."` on every
+///                      silent 30-second window.
 /// `progress_tx`      — optional broadcast channel for progress events.
 pub async fn transcribe(
     whisper_cli_path: &str,
     model_path: &str,
     wav_path: &str,
     language: &str,
+    vad_model_path: Option<&str>,
     progress_tx: Option<tokio::sync::broadcast::Sender<ProgressEvent>>,
     mut cancel_rx: Option<CancelRx>,
 ) -> anyhow::Result<Vec<TranscriptSegment>> {
@@ -134,6 +140,10 @@ pub async fn transcribe(
         "--output-json",
         "--print-progress",
     ]);
+    if let Some(vad_path) = vad_model_path.filter(|p| !p.is_empty()) {
+        cmd.args(["--vad", "--vad-model", vad_path]);
+        info!(vad_model = vad_path, "Enabling VAD");
+    }
 
     // Both pipes MUST be drained. Piping stdout without draining deadlocks
     // whisper-cli on long files (the ~64 KB Windows pipe buffer fills up and

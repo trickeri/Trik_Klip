@@ -39,6 +39,7 @@ pub fn build_routes() -> Router<Arc<AppState>> {
         .route("/api/pipeline/transcribe", post(pipeline_transcribe))
         .route("/api/pipeline/analyze", post(pipeline_analyze))
         .route("/api/pipeline/extract", post(pipeline_extract))
+        .route("/api/pipeline/load-saved", post(load_saved_clips))
         .route("/api/pipeline/slices", post(pipeline_slices))
         .route("/api/slices/clips", get(list_clip_folders))
         .route("/api/slices/premiere-prompt", post(write_premiere_prompt))
@@ -171,6 +172,104 @@ async fn pipeline_slices(
     });
 
     Ok((StatusCode::ACCEPTED, Json(json!({"status": "started"}))))
+}
+
+// ---------------------------------------------------------------------------
+// Load a saved clips.json sidecar so the user can re-run Extract without
+// paying tokens again. Derives the source mp4 path from the clips.json
+// location (sidecars live at `<mp4_parent>/Clips/<stem>/<stem>_clips.json`),
+// and pulls the companion transcript sidecar too if present so the backend
+// can write per-clip transcript slices on extraction.
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct LoadSavedRequest {
+    clips_json_path: String,
+}
+
+#[derive(Serialize)]
+struct LoadSavedResponse {
+    clips: serde_json::Value,
+    segments: serde_json::Value,
+    source_path: Option<String>,
+    output_dir: String,
+}
+
+async fn load_saved_clips(
+    Json(req): Json<LoadSavedRequest>,
+) -> Result<Json<LoadSavedResponse>, AppError> {
+    let clips_path = std::path::Path::new(&req.clips_json_path);
+    if !clips_path.is_file() {
+        return Err(AppError::BadRequest(format!(
+            "Not a file: {}",
+            req.clips_json_path
+        )));
+    }
+
+    let clips_bytes = tokio::fs::read(clips_path)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Read {}: {}", req.clips_json_path, e)))?;
+    let clips: serde_json::Value = serde_json::from_slice(&clips_bytes)
+        .map_err(|e| AppError::BadRequest(format!("Parse clips JSON: {}", e)))?;
+
+    // Derive the stem (strip `_clips.json` if present, else just use the
+    // bare file stem) so we can look up the companion transcript sidecar.
+    let file_stem = clips_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let stem = file_stem
+        .strip_suffix("_clips")
+        .unwrap_or(&file_stem)
+        .to_string();
+
+    let parent = clips_path
+        .parent()
+        .ok_or_else(|| AppError::BadRequest("clips_json_path has no parent".into()))?;
+
+    // Companion transcript: `<stem>_transcript.json` next to the clips file.
+    let transcript_path = parent.join(format!("{}_transcript.json", stem));
+    let segments = if transcript_path.is_file() {
+        match tokio::fs::read(&transcript_path).await {
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+                .unwrap_or(serde_json::Value::Array(Vec::new())),
+            Err(_) => serde_json::Value::Array(Vec::new()),
+        }
+    } else {
+        serde_json::Value::Array(Vec::new())
+    };
+
+    // Derive the source mp4 path assuming the Clips/<stem>/ layout Transcribe
+    // writes. `<parent>` is `<root>/Clips/<stem>/`; the mp4 lives at
+    // `<root>/../<stem>.<ext>` where <root> is `<parent>/../..`.
+    // Probe for common video extensions and return the first that exists.
+    let video_parent = parent
+        .parent() // Clips/
+        .and_then(|p| p.parent()); // <mp4_parent>
+    let source_path = video_parent.and_then(|vp| {
+        for ext in &["mp4", "mkv", "mov", "webm", "m4v"] {
+            let candidate = vp.join(format!("{}.{}", stem, ext));
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+        None
+    });
+
+    // Extract output_dir defaults to a `<stem>_clips` sibling under the same
+    // parent — matches what the Transcribe tab auto-fills on a fresh run.
+    let output_dir = parent
+        .join(format!("{}_clips", stem))
+        .to_string_lossy()
+        .into_owned();
+
+    Ok(Json(LoadSavedResponse {
+        clips,
+        segments,
+        source_path,
+        output_dir,
+    }))
 }
 
 #[derive(Deserialize)]

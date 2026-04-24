@@ -60,6 +60,57 @@
     input.click();
   }
 
+  // Re-hydrate the Extract tab from a previously-saved clips JSON sidecar
+  // — lets the user run Extract on a video they already analyzed without
+  // spending LLM tokens again. Derives the source video path and pulls in
+  // the companion transcript so per-clip transcript slices still get written.
+  async function loadSavedClips() {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Clips JSON', extensions: ['json'] }],
+      });
+      if (typeof selected !== 'string' || !selected) return;
+
+      const res = await apiFetch<{
+        clips: any[];
+        segments: any[];
+        source_path: string | null;
+        output_dir: string;
+      }>('/pipeline/load-saved', {
+        method: 'POST',
+        body: JSON.stringify({ clips_json_path: selected }),
+      });
+
+      if (!Array.isArray(res.clips) || res.clips.length === 0) {
+        addLog('error', 'Clips JSON contains no clips');
+        return;
+      }
+
+      clips.set(res.clips);
+      transcriptSegments.set(Array.isArray(res.segments) ? res.segments : []);
+      outputDir.set(res.output_dir);
+      outDir = res.output_dir;
+
+      if (res.source_path) {
+        mp4Path.set(res.source_path);
+        addLog(
+          'info',
+          `Loaded ${res.clips.length} clips from ${selected} (source: ${res.source_path})`,
+        );
+      } else {
+        addLog(
+          'warn',
+          `Loaded ${res.clips.length} clips from ${selected} — couldn't auto-locate the source video. Drop it onto the Transcribe tab before extracting.`,
+        );
+      }
+    } catch (e: any) {
+      addLog('error', `Load saved clips failed: ${e.message || e}`);
+    }
+  }
+
   async function extractSelected() {
     const selected = $clips.filter(c => selectedClips.has(c.rank));
     if (selected.length === 0) {
@@ -103,6 +154,7 @@
     <div class="clip-header-row">
       <h4 class="card-title">Clip Selection</h4>
       <span class="clip-count">{$clips.length} clips</span>
+      <button class="btn btn-small btn-secondary" on:click={loadSavedClips} disabled={$pipelineRunning}>Load Saved…</button>
       <button class="btn btn-small btn-secondary" on:click={selectAll} disabled={$clips.length === 0}>Select All</button>
       <button class="btn btn-small btn-secondary" on:click={deselectAll} disabled={$clips.length === 0}>Deselect All</button>
     </div>
@@ -110,7 +162,7 @@
     <!-- Clip List -->
     <div class="clips-list">
       {#if $clips.length === 0}
-        <div class="empty-state">No clips yet. Run the pipeline from the Transcribe tab.</div>
+        <div class="empty-state">No clips yet. Run the pipeline from the Transcribe tab, or use <strong>Load Saved…</strong> to re-open a previous analysis.</div>
       {:else}
         {#each $clips as clip}
           <ClipCard {clip} selected={selectedClips.has(clip.rank)} onToggle={toggleClip} />
