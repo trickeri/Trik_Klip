@@ -1,4 +1,3 @@
-// Theme constants matching gui_qt/theme.py
 export const theme = {
   bg: "#1e1e2e",
   panel: "#252535",

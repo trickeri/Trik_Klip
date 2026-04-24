@@ -1,24 +1,24 @@
 .env
-.venv/
-__pycache__/
-*.pyc
-*.wav
-streamclipper_profiles.json
 .trik_klip_license
-build_env/
-build/
-dist/
+streamclipper_profiles.json
 
-# Rust/Tauri
+# Rust / Tauri
 target/
 node_modules/
-dist_python/
-build_python/
 portable-staging/
 logs/
-.buildenv/
 *.zip
 public/
+
+# Frontend build output (Vite/Tauri)
+dist/
+
+# Claude Code runtime state
+.claude/scheduled_tasks.lock
+
+# graphify temp scratch
+.graphify_python
+.graphify_*.py
 
 # Large bundled resources (ffmpeg, whisper binaries/models)
 src-tauri/resources/*.exe

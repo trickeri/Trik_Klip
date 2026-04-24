@@ -18,7 +18,7 @@ echo "  cloc.json and cloc.txt written to $METRICS_DIR/"
 
 # ── 2. Token estimates ──────────────────────────────────────────────────────
 
-python3 - <<'PYEOF'
+python - <<'PYEOF'
 import json, os, subprocess, sys
 
 metrics_dir = "metrics"

@@ -1,11 +1,11 @@
 # Trik_Klip Changelog
 
-## Versioning Rules
-
-- **Bug fixes** (small patches, crash fixes): increment by 0.01 (e.g. 1.0.00 -> 1.0.01)
-- **Hotfixes** (rapid follow-up patches to a version): append a letter suffix (e.g. 1.0.01_a, 1.0.01_b, 1.0.01_c). Use when bundling multiple small fixes before the next full version bump.
-- **Major updates** (new features, significant changes): increment the second number by 1 (e.g. 1.0.xx -> 1.1.00)
-- When the update type is unclear, confirm the new version number with the user before packaging.
+Current versioning for the Rust/Tauri build follows the `0.1.x` scheme — see
+[RELEASE.md](RELEASE.md#2-bump-the-version). Historical entries below (`v1.0.xx`) are
+from the Python/PyInstaller era and are preserved for context. The Python client
+(`clip_finder.py`, `gui.py`, `gui_qt/`, `providers.py`, `licensing.py`, PyInstaller
+specs) was removed from the repo after the Rust port reached parity — fetch it from
+git history if needed.
 
 ---
 

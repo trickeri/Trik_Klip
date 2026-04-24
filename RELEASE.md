@@ -8,10 +8,6 @@ available as a prebuilt CI-friendly artifact. The GitHub Actions workflow only h
 the distribution side: downloading the pre-built zip from the release assets, uploading
 to Cloudflare R2, and registering the release with the Nuldrums website.
 
-> **Note:** The legacy `BUILD.md` in this repo describes the old PyInstaller-based Python
-> build and is no longer relevant to the current Rust/Tauri version. See below for the
-> current flow.
-
 ## To cut a release
 
 The preferred way is to use `/deploy` from Claude Code, which walks through everything

@@ -2,23 +2,35 @@
   "header": {
     "cloc_url": "github.com/AlDanial/cloc",
     "cloc_version": "2.06",
-    "elapsed_seconds": 0.908974885940552,
-    "n_files": 14,
-    "n_lines": 7744,
-    "files_per_second": 15.4019656830383,
-    "lines_per_second": 8519.48730353202
+    "elapsed_seconds": 0.883275985717773,
+    "n_files": 77,
+    "n_lines": 18989,
+    "files_per_second": 87.1754709117646,
+    "lines_per_second": 21498.3768460195
   },
-  "Python": {
-    "nFiles": 7,
-    "blank": 961,
-    "comment": 833,
-    "code": 4583
+  "Rust": {
+    "nFiles": 31,
+    "blank": 970,
+    "comment": 785,
+    "code": 6698
+  },
+  "JSON": {
+    "nFiles": 9,
+    "blank": 0,
+    "comment": 0,
+    "code": 4511
+  },
+  "Svelte": {
+    "nFiles": 11,
+    "blank": 397,
+    "comment": 157,
+    "code": 3039
   },
   "Markdown": {
-    "nFiles": 4,
-    "blank": 216,
+    "nFiles": 8,
+    "blank": 271,
     "comment": 0,
-    "code": 546
+    "code": 691
   },
   "JSX": {
     "nFiles": 1,
@@ -26,42 +38,84 @@
     "comment": 4,
     "code": 473
   },
-  "JSON": {
+  "TypeScript": {
+    "nFiles": 7,
+    "blank": 27,
+    "comment": 30,
+    "code": 301
+  },
+  "CSS": {
+    "nFiles": 1,
+    "blank": 32,
+    "comment": 7,
+    "code": 193
+  },
+  "YAML": {
+    "nFiles": 1,
+    "blank": 8,
+    "comment": 15,
+    "code": 76
+  },
+  "Bourne Shell": {
+    "nFiles": 1,
+    "blank": 21,
+    "comment": 9,
+    "code": 66
+  },
+  "TOML": {
+    "nFiles": 3,
+    "blank": 6,
+    "comment": 0,
+    "code": 65
+  },
+  "HTML": {
     "nFiles": 1,
     "blank": 0,
     "comment": 0,
-    "code": 48
+    "code": 27
   },
   "Text": {
     "nFiles": 1,
-    "blank": 2,
+    "blank": 0,
     "comment": 0,
-    "code": 17
+    "code": 20
+  },
+  "JavaScript": {
+    "nFiles": 1,
+    "blank": 1,
+    "comment": 0,
+    "code": 9
+  },
+  "PowerShell": {
+    "nFiles": 1,
+    "blank": 3,
+    "comment": 10,
+    "code": 6
   },
   "SUM": {
-    "blank": 1240,
-    "comment": 837,
-    "code": 5667,
-    "nFiles": 14
+    "blank": 1797,
+    "comment": 1017,
+    "code": 16175,
+    "nFiles": 77
   },
   "token_estimate": {
-    "total_bytes": 817335,
-    "total_tokens_est": 233524,
+    "total_bytes": 2020285,
+    "total_tokens_est": 577224,
     "chars_per_token": 3.5,
     "context_windows": {
       "Claude 200k": {
         "window": 200000,
-        "usage_pct": 116.8,
+        "usage_pct": 288.6,
         "fits": "No"
       },
       "GPT-4o 128k": {
         "window": 128000,
-        "usage_pct": 182.4,
+        "usage_pct": 451.0,
         "fits": "No"
       },
       "Gemini 1M": {
         "window": 1000000,
-        "usage_pct": 23.4,
+        "usage_pct": 57.7,
         "fits": "Yes"
       }
     }
