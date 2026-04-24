@@ -1,5 +1,4 @@
-const BASE = "http://127.0.0.1:31416";
-
+import { getApiBase } from './api';
 import type { ClipSuggestion, TranscriptSegment } from './types';
 
 export type ProgressEvent =
@@ -22,23 +21,33 @@ export function subscribeProgress(
   onEvent: (event: ProgressEvent) => void,
   onError?: (err: Event) => void
 ): () => void {
-  const es = new EventSource(`${BASE}/api/pipeline/progress`);
+  // Resolve the backend URL asynchronously, then open the EventSource.
+  // Callers may invoke the returned cleanup before the URL resolves — in
+  // that case we set a flag so the post-resolve code closes the socket
+  // immediately after opening it.
+  let cancelled = false;
+  let es: EventSource | null = null;
 
-  es.onmessage = (e) => {
-    try {
-      const event: ProgressEvent = JSON.parse(e.data);
-      onEvent(event);
-    } catch {
-      // ignore malformed events
-    }
+  getApiBase().then((base) => {
+    if (cancelled) return;
+    es = new EventSource(`${base}/api/pipeline/progress`);
+    es.onmessage = (e) => {
+      try {
+        const event: ProgressEvent = JSON.parse(e.data);
+        onEvent(event);
+      } catch {
+        // ignore malformed events
+      }
+    };
+    es.onerror = (e) => {
+      if (onError) onError(e);
+    };
+  });
+
+  return () => {
+    cancelled = true;
+    if (es) es.close();
   };
-
-  es.onerror = (e) => {
-    if (onError) onError(e);
-  };
-
-  // Return cleanup function
-  return () => es.close();
 }
 
 // Store-integrated SSE connection
