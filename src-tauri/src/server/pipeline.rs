@@ -596,12 +596,74 @@ async fn run_full_pipeline_inner(
     )
     .await;
 
+    // The audio sidecar exists only for verifying whisper's output against
+    // the chosen audio track. Once the extraction list (clips JSON) is on
+    // disk the pipeline has everything it needs and the ~900 MB WAV is
+    // dead weight — delete it here AND the temp working copy.
+    cleanup_audio_artifacts(
+        &temp_wav_path(&state, &params.source_path),
+        params.save_transcript_path.as_deref(),
+        &params.source_path,
+        tx,
+    )
+    .await;
+
     Ok(PipelineResult {
         clips,
         transcript_hash: String::new(),
         duration_seconds: duration,
         segments,
     })
+}
+
+/// Remove the sidecar WAV (next to the transcript JSON) and the temp WAV
+/// (in AppData). Silent on "file didn't exist"; warns on real errors.
+/// Called at the end of Full Pipeline once the clips JSON is written.
+async fn cleanup_audio_artifacts(
+    temp_wav: &std::path::Path,
+    save_transcript_path: Option<&str>,
+    source_path: &str,
+    tx: &tokio::sync::broadcast::Sender<ProgressEvent>,
+) {
+    // Temp WAV in AppData.
+    if temp_wav.is_file() {
+        match tokio::fs::remove_file(temp_wav).await {
+            Ok(_) => {}
+            Err(e) => warn!(path = %temp_wav.display(), error = %e, "Could not delete temp WAV"),
+        }
+    }
+
+    // Sidecar WAV next to the transcript — built with the same derivation
+    // that copy_audio_sidecar used, so we know where to look.
+    let Some(transcript_path) = save_transcript_path.filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let Some(parent) = std::path::Path::new(transcript_path).parent() else {
+        return;
+    };
+    let stem = std::path::Path::new(source_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("audio");
+    let sidecar = parent.join(format!("{}_audio.wav", stem));
+
+    if sidecar.is_file() {
+        match tokio::fs::remove_file(&sidecar).await {
+            Ok(_) => {
+                let _ = tx.send(ProgressEvent::Log {
+                    level: "info".into(),
+                    message: format!("Cleaned up audio WAV at {}", sidecar.display()),
+                });
+            }
+            Err(e) => {
+                warn!(path = %sidecar.display(), error = %e, "Could not delete audio sidecar");
+                let _ = tx.send(ProgressEvent::Log {
+                    level: "warn".into(),
+                    message: format!("Failed to clean up {}: {}", sidecar.display(), e),
+                });
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
