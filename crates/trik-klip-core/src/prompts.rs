@@ -182,12 +182,21 @@ NOTES: [Optional: music mood, caption style, thumbnail idea, B-roll suggestions]
 /// Regex matching cut-list lines like:
 ///   1. [00:12:34.5] -> [00:13:00.0] | reason text
 ///   2) 12:34 → 13:00 | reason text
+///   - [00:12:34] → [00:13:00] | reason text
+///   • 12:34 -> 13:00
+///   12:34 → 13:00 | reason
 ///
+/// The leading list marker is optional so off-format LLM responses still
+/// parse — without this the Slice step silently produces an edit-plan
+/// file with zero cuts and users have to re-run the slicer.
 /// Matches HH:MM:SS, HH:MM:SS.s, MM:SS, MM:SS.s with optional brackets.
 static CUT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    let ts = r"\[?(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\]?";
+    // Timestamp may be wrapped in [], `` (code/inline), or bare — LLMs
+    // sometimes pick the wrong wrapper even when the prompt says [].
+    let ts = r"[\[`]?(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)[\]`]?";
     let pattern = [
-        r"(?m)^\s*\d+[.)]\s*",
+        // start of line, optional indent, optional list marker
+        r"(?m)^\s*(?:\d+[.):\]]|[-*\u{2022}])?\s*",
         ts,
         r"\s*[-\u{2192}\u{2013}\u{2014}>]+\s*",
         ts,
@@ -360,6 +369,30 @@ CUT LIST:
         assert_eq!(cuts.len(), 1);
         assert!((cuts[0].start - 60.0).abs() < 0.1);
         assert!((cuts[0].end - 120.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn parse_cut_list_with_backticks() {
+        // Observed in the wild — LLM wrapped timestamps in backticks
+        // instead of the requested brackets, producing an edit plan
+        // but zero slices.
+        let text = "\
+CUT LIST:
+1. `06:07:57.0` \u{2192} `06:08:34.0` | Revelation hits
+2. `06:10:04.0` \u{2192} `06:10:26.0` | Full restatement
+3. `06:10:33.0` \u{2192} `06:11:07.0` | Strategic payoff
+";
+        let cuts = parse_cut_list(text);
+        assert_eq!(cuts.len(), 3);
+        assert!((cuts[0].start - (6.0 * 3600.0 + 7.0 * 60.0 + 57.0)).abs() < 0.1);
+        assert!((cuts[2].end - (6.0 * 3600.0 + 11.0 * 60.0 + 7.0)).abs() < 0.1);
+    }
+
+    #[test]
+    fn parse_cut_list_dash_bullet() {
+        let text = "- 01:00 \u{2192} 02:00 | dash bullet\n";
+        let cuts = parse_cut_list(text);
+        assert_eq!(cuts.len(), 1);
     }
 
     #[test]

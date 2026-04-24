@@ -1342,6 +1342,21 @@ async fn process_single_clip_dir(
     // Parse the cut list.
     let cuts = parse_cut_list(&response.text);
     if cuts.is_empty() {
+        let folder = clip_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("clip");
+        let msg = format!(
+            "No slices for {}: LLM response didn't match the expected \
+             CUT LIST format. Edit plan saved at {} — re-run Slice to retry.",
+            folder,
+            plan_path.display()
+        );
+        warn!("{}", msg);
+        let _ = tx.send(ProgressEvent::Log {
+            level: "warn".into(),
+            message: msg,
+        });
         return Ok(ClipSliceInfo {
             clip_dir: clip_dir.to_string_lossy().into_owned(),
             edit_plan_path: plan_path.to_string_lossy().into_owned(),
