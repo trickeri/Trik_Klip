@@ -88,15 +88,31 @@
     }
   }
 
+  /// Static defaults from /providers — always populated at tab load,
+  /// independent of whether an API key is configured. Used as the dropdown
+  /// source when the live /providers/<name>/models refresh fails (typically
+  /// because the user hasn't saved a key yet for that provider).
+  function defaultModelsFor(provider: string): string[] {
+    const entry = providers.find(p => p.key === provider);
+    return entry?.models ?? [];
+  }
+
   async function loadModels(provider: string) {
     if (!provider) { models = []; modelsError = ''; return; }
     refreshingModels = true;
     modelsError = '';
+    // Seed with the static defaults immediately so the dropdown is
+    // never empty while the live request is in flight (or when it fails
+    // because no API key is configured yet).
+    models = defaultModelsFor(provider);
     try {
-      models = await apiFetch<string[]>(`/providers/${provider}/models`);
+      const live = await apiFetch<string[]>(`/providers/${provider}/models`);
+      if (Array.isArray(live) && live.length > 0) {
+        models = live;
+      }
     } catch (e: any) {
-      models = [];
-      modelsError = e.message || 'Could not load models';
+      // Keep the static defaults; surface the reason as a subtle hint.
+      modelsError = e.message || 'Could not refresh models';
     } finally {
       refreshingModels = false;
     }
@@ -483,8 +499,10 @@
           {refreshingModels ? 'Refreshing...' : 'Refresh'}
         </button>
       </div>
-      {#if modelsError}
+      {#if modelsError && models.length === 0}
         <span class="env-hint" style="color: var(--error);">{modelsError}</span>
+      {:else if modelsError}
+        <span class="env-hint" style="color: var(--dim);">Showing defaults — live refresh failed: {modelsError}</span>
       {:else if models.length > 0}
         <span class="env-hint">{models.length} known model{models.length === 1 ? '' : 's'} — type to filter or enter a custom name</span>
       {/if}
