@@ -138,19 +138,6 @@
     });
   }
 
-  function applyProfile() {
-    const p = profiles.find(pr => pr.id === selectedProfileId);
-    if (p) {
-      activeProfile.set({
-        provider: p.provider,
-        model: p.model,
-        api_key: p.api_key,
-        base_url: p.base_url,
-      });
-      addLog('info', `Applied profile "${p.name}"`);
-    }
-  }
-
   function startCreate() {
     creating = true;
     selectedProfileId = '';
@@ -425,14 +412,16 @@
     <div class="active-profile-row">
       <select bind:value={selectedProfileId} on:change={() => {
         const p = profiles.find(pr => pr.id === selectedProfileId);
-        if (p) selectProfile(p);
+        if (p) {
+          selectProfile(p);
+          addLog('info', `Applied profile "${p.name}"`);
+        }
       }}>
         <option value="">Select profile...</option>
         {#each profiles as profile}
           <option value={profile.id}>{profile.name} ({providerLabel(profile.provider)})</option>
         {/each}
       </select>
-      <button class="btn btn-small btn-secondary" on:click={applyProfile} disabled={!selectedProfileId}>Apply</button>
     </div>
   </div>
 
