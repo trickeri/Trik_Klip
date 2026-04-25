@@ -1,6 +1,6 @@
 {
   "productName": "Trik Klip",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "identifier": "com.trikeri.trikklip",
   "build": {
     "frontendDist": "../dist",
@@ -11,7 +11,7 @@
   "app": {
     "windows": [
       {
-        "title": "Trik Klip v0.1.21",
+        "title": "Trik Klip v0.1.22",
         "width": 860,
         "height": 1000,
         "minWidth": 860,
