@@ -68,6 +68,15 @@ pub struct PipelineParams {
     /// field. Written only for Full Pipeline / Analyze Only (not Transcribe Only).
     #[serde(default)]
     pub output_json_path: Option<String>,
+    /// When false, skip volume-spike detection so the LLM sees no audio-energy
+    /// notes. UI checkbox; defaults to true.
+    #[serde(default = "default_true")]
+    pub use_spike_analysis: bool,
+    /// When false, blank the transcript text in each chunk before LLM analysis
+    /// so the model sees only spike annotations (or nothing, if spike analysis
+    /// is also off — which the UI / backend forbid). Defaults to true.
+    #[serde(default = "default_true")]
+    pub use_transcript_analysis: bool,
 }
 
 fn default_language() -> String {
@@ -87,6 +96,9 @@ fn default_window_minutes() -> f64 {
 }
 fn default_overlap_minutes() -> f64 {
     1.0
+}
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -161,6 +173,10 @@ pub struct AnalyzeOnlyParams {
     pub overlap_minutes: f64,
     #[serde(default)]
     pub custom_prompts: Option<Vec<String>>,
+    #[serde(default = "default_true")]
+    pub use_spike_analysis: bool,
+    #[serde(default = "default_true")]
+    pub use_transcript_analysis: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -461,6 +477,8 @@ async fn run_full_pipeline_inner(
     state: Arc<AppState>,
     params: PipelineParams,
 ) -> Result<PipelineResult> {
+    let skip_analyze = !params.use_spike_analysis && !params.use_transcript_analysis;
+
     let mut cancel_rx = state.cancel_tx.subscribe();
     let tx = &state.progress_tx;
 
@@ -484,17 +502,25 @@ async fn run_full_pipeline_inner(
     .await?;
     check_cancel(&mut cancel_rx)?;
 
-    // Spike detection
-    let _ = tx.send(ProgressEvent::Log {
-        level: "info".into(),
-        message: "Detecting volume spikes...".into(),
-    });
-    let wp = wav_path.to_string_lossy().to_string();
-    let spikes =
-        tokio::task::spawn_blocking(move || detect_volume_spikes_default(&wp)).await??;
-    let _ = tx.send(ProgressEvent::SpikeDetection {
-        spike_count: spikes.len(),
-    });
+    // Spike detection — gated by the Volume Spike Analysis checkbox.
+    let spikes = if params.use_spike_analysis {
+        let _ = tx.send(ProgressEvent::Log {
+            level: "info".into(),
+            message: "Detecting volume spikes...".into(),
+        });
+        let wp = wav_path.to_string_lossy().to_string();
+        let s = tokio::task::spawn_blocking(move || detect_volume_spikes_default(&wp)).await??;
+        let _ = tx.send(ProgressEvent::SpikeDetection {
+            spike_count: s.len(),
+        });
+        s
+    } else {
+        let _ = tx.send(ProgressEvent::Log {
+            level: "info".into(),
+            message: "Skipping volume spike analysis (disabled).".into(),
+        });
+        Vec::new()
+    };
     check_cancel(&mut cancel_rx)?;
 
     // Transcribe
@@ -527,34 +553,9 @@ async fn run_full_pipeline_inner(
 
     check_cancel(&mut cancel_rx)?;
 
-    // 7. Chunk + annotate
-    let _ = tx.send(ProgressEvent::Log {
-        level: "info".into(),
-        message: "Chunking transcript...".into(),
-    });
-    let mut chunks = chunk_transcript(&segments, params.window_minutes, params.overlap_minutes);
-    annotate_chunks_with_spikes(&mut chunks, &spikes);
-    let _ = tx.send(ProgressEvent::Chunking {
-        chunk_count: chunks.len(),
-    });
-    check_cancel(&mut cancel_rx)?;
-
-    // 8. Analyze via LLM
-    let _ = tx.send(ProgressEvent::Log {
-        level: "info".into(),
-        message: format!("Analyzing {} chunks with {}...", chunks.len(), params.provider),
-    });
-
-    let api_key = resolve_api_key(&state, &params.provider, params.api_key.as_deref());
-    let base_url = resolve_base_url(&state, &params.provider, params.base_url.as_deref());
-    let provider_box =
-        make_provider(&params.provider, &api_key, &base_url, state.http_client.clone(), Some(cancel_rx.clone()))?;
-    let provider_arc: Arc<dyn trik_klip_core::llm::LlmProvider> = Arc::from(provider_box);
-
-    let custom_prompts_ref = params.custom_prompts.as_deref();
-
     // Save the transcript to the user-specified path before analysis — so
-    // even if the LLM step dies, the transcript is on disk.
+    // even if the LLM step dies (or analysis is skipped), the transcript is
+    // on disk.
     write_sidecar_json(
         params.save_transcript_path.as_deref(),
         &segments,
@@ -575,26 +576,81 @@ async fn run_full_pipeline_inner(
     )
     .await;
 
-    let clips = find_clips(
-        &chunks,
-        provider_arc,
-        &params.model,
-        params.top_n,
-        params.padding_seconds,
-        duration,
-        params.max_workers,
-        custom_prompts_ref.map(|v| &v[..]),
-        Some(tx),
-    )
-    .await;
+    let clips = if skip_analyze {
+        let _ = tx.send(ProgressEvent::Log {
+            level: "info".into(),
+            message:
+                "Skipping clip analysis (both Volume Spike Analysis and Transcript Analysis are off)."
+                    .into(),
+        });
+        Vec::new()
+    } else {
+        // 7. Chunk + annotate
+        let _ = tx.send(ProgressEvent::Log {
+            level: "info".into(),
+            message: "Chunking transcript...".into(),
+        });
+        let mut chunks =
+            chunk_transcript(&segments, params.window_minutes, params.overlap_minutes);
+        // If transcript analysis is disabled but spike analysis is on, blank
+        // the chunk text so the LLM sees only the spike annotations.
+        if !params.use_transcript_analysis {
+            for c in chunks.iter_mut() {
+                c.text = "(transcript analysis disabled by user)".to_string();
+            }
+        }
+        annotate_chunks_with_spikes(&mut chunks, &spikes);
+        let _ = tx.send(ProgressEvent::Chunking {
+            chunk_count: chunks.len(),
+        });
+        check_cancel(&mut cancel_rx)?;
 
-    write_sidecar_json(
-        params.output_json_path.as_deref(),
-        &clips,
-        "clips JSON",
-        tx,
-    )
-    .await;
+        // 8. Analyze via LLM
+        let _ = tx.send(ProgressEvent::Log {
+            level: "info".into(),
+            message: format!(
+                "Analyzing {} chunks with {}...",
+                chunks.len(),
+                params.provider
+            ),
+        });
+
+        let api_key = resolve_api_key(&state, &params.provider, params.api_key.as_deref());
+        let base_url = resolve_base_url(&state, &params.provider, params.base_url.as_deref());
+        let provider_box = make_provider(
+            &params.provider,
+            &api_key,
+            &base_url,
+            state.http_client.clone(),
+            Some(cancel_rx.clone()),
+        )?;
+        let provider_arc: Arc<dyn trik_klip_core::llm::LlmProvider> = Arc::from(provider_box);
+
+        let custom_prompts_ref = params.custom_prompts.as_deref();
+
+        let clips = find_clips(
+            &chunks,
+            provider_arc,
+            &params.model,
+            params.top_n,
+            params.padding_seconds,
+            duration,
+            params.max_workers,
+            custom_prompts_ref.map(|v| &v[..]),
+            Some(tx),
+        )
+        .await;
+
+        write_sidecar_json(
+            params.output_json_path.as_deref(),
+            &clips,
+            "clips JSON",
+            tx,
+        )
+        .await;
+
+        clips
+    };
 
     // The audio sidecar exists only for verifying whisper's output against
     // the chosen audio track. Once the extraction list (clips JSON) is on
@@ -727,12 +783,21 @@ async fn run_transcribe_only_inner(
     .await?;
     check_cancel(&mut cancel_rx)?;
 
-    // Spike detection
-    let wp = wav_path.to_string_lossy().to_string();
-    let spikes = tokio::task::spawn_blocking(move || detect_volume_spikes_default(&wp)).await??;
-    let _ = tx.send(ProgressEvent::SpikeDetection {
-        spike_count: spikes.len(),
-    });
+    // Spike detection — gated by the Volume Spike Analysis checkbox.
+    let spikes = if params.use_spike_analysis {
+        let wp = wav_path.to_string_lossy().to_string();
+        let s = tokio::task::spawn_blocking(move || detect_volume_spikes_default(&wp)).await??;
+        let _ = tx.send(ProgressEvent::SpikeDetection {
+            spike_count: s.len(),
+        });
+        s
+    } else {
+        let _ = tx.send(ProgressEvent::Log {
+            level: "info".into(),
+            message: "Skipping volume spike analysis (disabled).".into(),
+        });
+        Vec::new()
+    };
     check_cancel(&mut cancel_rx)?;
 
     // Transcribe
@@ -828,6 +893,8 @@ async fn run_analyze_only_inner(
     state: Arc<AppState>,
     params: AnalyzeOnlyParams,
 ) -> Result<PipelineResult> {
+    let skip_analyze = !params.use_spike_analysis && !params.use_transcript_analysis;
+
     let mut cancel_rx = state.cancel_tx.subscribe();
     let tx = &state.progress_tx;
 
@@ -873,8 +940,15 @@ async fn run_analyze_only_inner(
         );
     };
 
-    // Re-detect spikes if WAV available (only when we have a source path).
-    let spikes = if params.source_path.is_empty() {
+    // Re-detect spikes if WAV available (only when we have a source path
+    // AND the user kept Volume Spike Analysis checked).
+    let spikes = if !params.use_spike_analysis {
+        let _ = tx.send(ProgressEvent::Log {
+            level: "info".into(),
+            message: "Skipping volume spike analysis (disabled).".into(),
+        });
+        Vec::new()
+    } else if params.source_path.is_empty() {
         Vec::new()
     } else {
         let wav_path = temp_wav_path(&state, &params.source_path);
@@ -888,35 +962,56 @@ async fn run_analyze_only_inner(
     };
     check_cancel(&mut cancel_rx)?;
 
-    // Chunk + annotate
-    let mut chunks = chunk_transcript(&segments, params.window_minutes, params.overlap_minutes);
-    annotate_chunks_with_spikes(&mut chunks, &spikes);
-    let _ = tx.send(ProgressEvent::Chunking {
-        chunk_count: chunks.len(),
-    });
-    check_cancel(&mut cancel_rx)?;
+    let clips = if skip_analyze {
+        let _ = tx.send(ProgressEvent::Log {
+            level: "info".into(),
+            message:
+                "Skipping clip analysis (both Volume Spike Analysis and Transcript Analysis are off)."
+                    .into(),
+        });
+        Vec::new()
+    } else {
+        // Chunk + annotate
+        let mut chunks =
+            chunk_transcript(&segments, params.window_minutes, params.overlap_minutes);
+        if !params.use_transcript_analysis {
+            for c in chunks.iter_mut() {
+                c.text = "(transcript analysis disabled by user)".to_string();
+            }
+        }
+        annotate_chunks_with_spikes(&mut chunks, &spikes);
+        let _ = tx.send(ProgressEvent::Chunking {
+            chunk_count: chunks.len(),
+        });
+        check_cancel(&mut cancel_rx)?;
 
-    // Analyze
-    let api_key = resolve_api_key(&state, &params.provider, params.api_key.as_deref());
-    let base_url = resolve_base_url(&state, &params.provider, params.base_url.as_deref());
-    let provider_box =
-        make_provider(&params.provider, &api_key, &base_url, state.http_client.clone(), Some(cancel_rx.clone()))?;
-    let provider_arc: Arc<dyn trik_klip_core::llm::LlmProvider> = Arc::from(provider_box);
+        // Analyze
+        let api_key = resolve_api_key(&state, &params.provider, params.api_key.as_deref());
+        let base_url = resolve_base_url(&state, &params.provider, params.base_url.as_deref());
+        let provider_box = make_provider(
+            &params.provider,
+            &api_key,
+            &base_url,
+            state.http_client.clone(),
+            Some(cancel_rx.clone()),
+        )?;
+        let provider_arc: Arc<dyn trik_klip_core::llm::LlmProvider> = Arc::from(provider_box);
 
-    let custom_prompts_ref = params.custom_prompts.as_deref();
+        let custom_prompts_ref = params.custom_prompts.as_deref();
 
-    let clips = find_clips(
-        &chunks,
-        provider_arc,
-        &params.model,
-        params.top_n,
-        params.padding_seconds,
-        duration,
-        params.max_workers,
-        custom_prompts_ref.map(|v| &v[..]),
-        Some(tx),
-    )
-    .await;
+        find_clips(
+            &chunks,
+            provider_arc,
+            &params.model,
+            params.top_n,
+            params.padding_seconds,
+            duration,
+            params.max_workers,
+            custom_prompts_ref.map(|v| &v[..]),
+            Some(tx),
+        )
+        .await
+    };
 
     Ok(PipelineResult {
         clips,

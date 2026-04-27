@@ -33,6 +33,12 @@
   // Run mode: 0 = Full Pipeline, 1 = Transcribe Only, 2 = Analyze Only
   let runMode = 0;
 
+  // Analysis toggles. Both default to true. If both are unchecked, the
+  // backend skips the LLM analyze step entirely — Full Pipeline degenerates
+  // to extract+transcribe, Analyze Only becomes a no-op.
+  let useSpikeAnalysis = true;
+  let useTranscriptAnalysis = true;
+
   // Custom search prompts
   let customPrompts: string[] = [];
 
@@ -132,6 +138,8 @@
       output_dir: $mp4Path ? defaultBaseDir($mp4Path) : '',
       save_transcript_path: saveTranscriptPath || undefined,
       output_json_path: outputJsonPath || undefined,
+      use_spike_analysis: useSpikeAnalysis,
+      use_transcript_analysis: useTranscriptAnalysis,
     };
 
     // Add provider info for modes that need analysis
@@ -291,19 +299,39 @@
   <!-- Run Mode Card -->
   <div class="card">
     <h4 class="card-title">Run Mode</h4>
-    <div class="radio-group">
-      <label class="radio-label">
-        <input type="radio" bind:group={runMode} value={0} disabled={$pipelineRunning} />
-        Full Pipeline
-      </label>
-      <label class="radio-label">
-        <input type="radio" bind:group={runMode} value={1} disabled={$pipelineRunning} />
-        Transcribe Only
-      </label>
-      <label class="radio-label">
-        <input type="radio" bind:group={runMode} value={2} disabled={$pipelineRunning} />
-        Analyze Only
-      </label>
+    <div class="run-mode-row">
+      <div class="radio-group">
+        <label class="radio-label">
+          <input type="radio" bind:group={runMode} value={0} disabled={$pipelineRunning} />
+          Full Pipeline
+        </label>
+        <label class="radio-label">
+          <input type="radio" bind:group={runMode} value={1} disabled={$pipelineRunning} />
+          Transcribe Only
+        </label>
+        <label class="radio-label">
+          <input type="radio" bind:group={runMode} value={2} disabled={$pipelineRunning} />
+          Analyze Only
+        </label>
+      </div>
+      <div class="analysis-toggles">
+        <label class="check-label">
+          <input
+            type="checkbox"
+            bind:checked={useSpikeAnalysis}
+            disabled={$pipelineRunning}
+          />
+          Volume Spike Analysis
+        </label>
+        <label class="check-label">
+          <input
+            type="checkbox"
+            bind:checked={useTranscriptAnalysis}
+            disabled={$pipelineRunning}
+          />
+          Transcript Analysis
+        </label>
+      </div>
     </div>
   </div>
 
@@ -497,6 +525,15 @@
     flex: 1;
   }
 
+  /* Run Mode + analysis toggles */
+  .run-mode-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
   /* Radio group */
   .radio-group {
     display: flex;
@@ -516,6 +553,34 @@
     width: auto;
     accent-color: var(--accent);
     cursor: pointer;
+  }
+
+  .analysis-toggles {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    align-items: flex-start;
+    margin-left: auto;
+  }
+
+  .check-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .check-label input[type="checkbox"] {
+    width: auto;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+
+  .check-label input[type="checkbox"]:disabled {
+    cursor: not-allowed;
   }
 
   /* Progress */
