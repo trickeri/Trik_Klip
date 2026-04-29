@@ -14,8 +14,7 @@ pub struct PremiereConfig {
     pub banners: Vec<BannerEntry>,
     /// Position overrides for clips the MCP agent places on the timeline.
     /// Reported at the end of the prompt so the user can punch them into
-    /// Premiere's Effect Controls panel manually (documented Adobe UXP API
-    /// limitation — position cannot be set via the official MCP).
+    /// Premiere's Effect Controls panel manually (UXP bug workaround).
     pub positions: Vec<TrackPosition>,
 }
 
@@ -93,27 +92,24 @@ tools to set up a Premiere Pro Shorts project. You MUST call the tools
 described in each step — do NOT just describe what you would do. Actually
 invoke create_project, get_project_info, import_media, etc.
 
-Use Adobe's official Premiere Pro MCP connector (the mcp__pr-mcp__* tools
-exposed by the "Adobe for creativity" connector in Claude) for all Premiere
-operations, and Filesystem MCP (mcp__Windows-MCP__FileSystem) for file
-discovery only. Do NOT use any third-party or custom Premiere plugin —
-only the official Adobe-provided pr-mcp tool namespace.
+Use the Premiere MCP tools (mcp__pr-mcp__*) for all Premiere operations
+and Filesystem MCP (mcp__Windows-MCP__FileSystem) for file discovery only.
 
 Context & Known Behaviors
 * create_project will time out — this is expected behavior. Always follow it
   immediately with get_project_info to confirm the project was created
   successfully.
-* When a Shorts sequence is created via the official connector it starts
-  with 0 empty tracks — clips are added directly by targeting track indices.
+* The current plugin version creates 0 empty tracks when a Shorts sequence is
+  created — clips are added directly by targeting track indices.
 * KNOWN OFFSET: When add_media_to_sequence targets an index that requires
   Premiere to auto-create gap tracks, the resulting track index as reported
   by the API may be 1 lower than requested (e.g. requesting index 5 may
   land on index 4). To compensate, all post-gap track indices in this
   prompt are set 1 higher than the desired final position.
-* set_clip_transform scale works reliably. Position does NOT — this is a
-  documented Adobe UXP API limitation in the official connector, not a bug
-  in this tool. Do not attempt to set position via set_clip_transform; set
-  it manually in Premiere's Effect Controls panel after the script completes.
+* set_clip_transform scale works reliably. Position does NOT work due to a
+  known Premiere UXP API bug — do not attempt to set position via the tool.
+  Set position manually in Premiere's Effect Controls panel after the script
+  completes.
 
 Task
 You will be given a clip folder path. The folder contains a main .mp4 file

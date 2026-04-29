@@ -616,8 +616,7 @@
           </div>
           <p class="hint-text">
             These appear at the end of the prompt as reminders to set
-            manually in Effect Controls (documented Adobe UXP API
-            limitation — position cannot be set via the official connector).
+            manually in Effect Controls (UXP API bug workaround).
           </p>
           {#each premiereConfig.positions as pos, i}
             <div class="pos-row">
