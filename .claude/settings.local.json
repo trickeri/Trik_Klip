@@ -203,7 +203,13 @@
       "PowerShell(python .graphify_add_depots.py)",
       "PowerShell(python .graphify_html.py)",
       "PowerShell(python .graphify_finalize.py)",
-      "PowerShell(python .graphify_explain_path.py)"
+      "PowerShell(python .graphify_explain_path.py)",
+      "Bash(tee /tmp/tauri-build-022.log)",
+      "Bash(npx svelte-check *)",
+      "Bash(graphify update *)",
+      "Bash(git fetch *)",
+      "WebFetch(domain:developers.openai.com)",
+      "WebFetch(domain:github.com)"
     ]
   }
 }

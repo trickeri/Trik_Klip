@@ -61,6 +61,7 @@
     grok: 'XAI_API_KEY',
     ollama: '',
     claude_code: '',
+    codex_cli: '',
   };
 
   onMount(async () => {
@@ -252,6 +253,7 @@
       grok: 'Grok (xAI)',
       ollama: 'Ollama (Local)',
       claude_code: 'Claude Code',
+      codex_cli: 'Codex CLI (ChatGPT)',
     };
     return labels[p] || p;
   }

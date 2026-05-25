@@ -5,6 +5,7 @@ pub mod anthropic;
 pub mod openai_compat;
 pub mod gemini;
 pub mod claude_cli;
+pub mod codex_cli;
 pub mod provider_registry;
 
 pub use provider::{LlmProvider, LlmResponse};

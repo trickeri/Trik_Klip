@@ -535,6 +535,7 @@ async fn list_providers_handler(
                 "grok" => !settings.xai_api_key.is_empty(),
                 "ollama" => true,   // no key needed
                 "claude_code" => true, // uses CLI
+                "codex_cli" => true,   // uses CLI
                 _ => false,
             };
             let models = model_cache
@@ -608,6 +609,14 @@ async fn provider_models(
                 .map(|p| p.models.clone())
                 .unwrap_or_default()
         }
+        "codex_cli" => {
+            // Codex CLI uses the subscription CLI — return static list
+            let providers = provider_registry::list_providers();
+            providers
+                .get("codex_cli")
+                .map(|p| p.models.clone())
+                .unwrap_or_default()
+        }
         other => {
             return Err(AppError::NotFound(format!("Unknown provider: {}", other)));
         }
@@ -643,7 +652,7 @@ async fn test_provider(
     let api_key = if body.api_key.is_empty() {
         match body.provider.as_str() {
             "anthropic" | "claude_code" => state.settings.anthropic_api_key.clone(),
-            "openai" => state.settings.openai_api_key.clone(),
+            "openai" | "codex_cli" => state.settings.openai_api_key.clone(),
             "gemini" => state.settings.gemini_api_key.clone(),
             "grok" => state.settings.xai_api_key.clone(),
             _ => String::new(),

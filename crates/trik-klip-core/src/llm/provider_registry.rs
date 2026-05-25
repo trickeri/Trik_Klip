@@ -8,6 +8,7 @@ use tracing::{debug, warn};
 
 use super::anthropic::AnthropicProvider;
 use super::claude_cli::ClaudeCliProvider;
+use super::codex_cli::CodexCliProvider;
 use super::gemini::GeminiProvider;
 use super::openai_compat::OpenAiCompatProvider;
 use super::provider::LlmProvider;
@@ -110,6 +111,21 @@ fn default_claude_code_models() -> Vec<String> {
     .collect()
 }
 
+fn default_codex_cli_models() -> Vec<String> {
+    // Codex (ChatGPT-subscription) model names drift between CLI versions; these
+    // are sensible current defaults. An empty model string is also valid (we omit
+    // -m and let the user's ~/.codex config / account default decide).
+    [
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.3-codex",
+        "gpt-5.4-mini",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Registry construction
 // ---------------------------------------------------------------------------
@@ -180,6 +196,17 @@ pub fn list_providers() -> HashMap<&'static str, ProviderInfo> {
             env_key: "",
             default_model: "claude-sonnet-4-6",
             models: default_claude_code_models(),
+            base_url: "",
+        },
+    );
+
+    map.insert(
+        "codex_cli",
+        ProviderInfo {
+            label: "Codex CLI",
+            env_key: "",
+            default_model: "gpt-5.5",
+            models: default_codex_cli_models(),
             base_url: "",
         },
     );
@@ -487,6 +514,19 @@ pub fn make_provider(
                 Some(api_key.to_string())
             };
             let mut provider = ClaudeCliProvider::new(fallback, client);
+            if let Some(rx) = cancel_rx {
+                provider = provider.with_cancel(rx);
+            }
+            Ok(Box::new(provider))
+        }
+
+        "codex_cli" => {
+            let fallback = if api_key.is_empty() {
+                None
+            } else {
+                Some(api_key.to_string())
+            };
+            let mut provider = CodexCliProvider::new(fallback, client);
             if let Some(rx) = cancel_rx {
                 provider = provider.with_cancel(rx);
             }
