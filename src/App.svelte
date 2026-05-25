@@ -146,16 +146,52 @@
   function onWindowMouseUp() {
     resizing = false;
   }
+
+  // Track real focus state so the focus-acquiring click on the titlebar
+  // doesn't also start a window drag. On Windows, Tauri's native drag region
+  // (data-tauri-drag-region) gets stuck in a "follow mouse" state when the
+  // same click both focuses the window and triggers startDragging().
+  let windowFocused = $state(true);
+  function onWindowFocus() { windowFocused = true; }
+  function onWindowBlur() { windowFocused = false; }
+
+  async function onTitlebarMouseDown(e: MouseEvent) {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    if (target.closest('button, input, a')) return;
+    if (!windowFocused) {
+      windowFocused = true;
+      return;
+    }
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      await getCurrentWindow().startDragging();
+    } catch {}
+  }
+
+  async function onTitlebarDblClick(e: MouseEvent) {
+    const target = e.target as HTMLElement;
+    if (target.closest('button, input, a')) return;
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      await getCurrentWindow().toggleMaximize();
+    } catch {}
+  }
 </script>
 
-<svelte:window onmousemove={onWindowMouseMove} onmouseup={onWindowMouseUp} />
+<svelte:window
+  onmousemove={onWindowMouseMove}
+  onmouseup={onWindowMouseUp}
+  onfocus={onWindowFocus}
+  onblur={onWindowBlur}
+/>
 
 {#if LicenseGate}
   <LicenseGate />
 {/if}
 
 <div class="app" class:resizing>
-  <header class="titlebar" data-tauri-drag-region>
+  <header class="titlebar" onmousedown={onTitlebarMouseDown} ondblclick={onTitlebarDblClick}>
     <div class="title-block">
       <span class="title">Trik_Klip</span>
       <span class="title-sub">Trik_Klip</span>
