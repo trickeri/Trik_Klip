@@ -10,7 +10,7 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::Utc;
 use futures_core::Stream;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
@@ -707,9 +707,62 @@ async fn test_provider(
 
 async fn list_profiles(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<ProviderProfileRow>>, AppError> {
+) -> Result<Json<Vec<ProviderProfileResponse>>, AppError> {
     let profiles = db::list_provider_profiles(&state.db).await?;
-    Ok(Json(profiles))
+    Ok(Json(
+        profiles
+            .into_iter()
+            .map(ProviderProfileResponse::from)
+            .collect(),
+    ))
+}
+
+#[derive(Serialize)]
+struct ProviderProfileResponse {
+    id: String,
+    name: String,
+    provider: String,
+    model: String,
+    api_key: String,
+    base_url: String,
+    is_default: bool,
+    created_at: String,
+}
+
+impl From<ProviderProfileRow> for ProviderProfileResponse {
+    fn from(row: ProviderProfileRow) -> Self {
+        Self {
+            id: row.id,
+            name: row.name,
+            provider: row.provider,
+            model: row.model,
+            api_key: row.api_key,
+            base_url: row.base_url,
+            is_default: row.is_default != 0,
+            created_at: row.created_at,
+        }
+    }
+}
+
+fn deserialize_boolish<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Bool(v) => Ok(v),
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            _ => Err(serde::de::Error::custom("expected boolean or 0/1")),
+        },
+        serde_json::Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "false" | "0" => Ok(false),
+            "true" | "1" => Ok(true),
+            _ => Err(serde::de::Error::custom("expected boolean or 0/1")),
+        },
+        _ => Err(serde::de::Error::custom("expected boolean or 0/1")),
+    }
 }
 
 #[derive(Deserialize)]
@@ -721,7 +774,7 @@ struct CreateProfileRequest {
     api_key: String,
     #[serde(default)]
     base_url: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_boolish")]
     is_default: bool,
 }
 
