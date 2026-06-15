@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "title": "Trik Klip v0.1.27",
+        "width": 860,
+        "height": 1000,
+        "minWidth": 860,
+        "minHeight": 700,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": false
+      }
+    ]
+  }
+}

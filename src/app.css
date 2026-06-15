@@ -6,6 +6,10 @@
 }
 
 :root {
+  /* Theme form controls (e.g. native <select> popups) dark. Without this,
+     WebKitGTK on Linux renders selects with a white background; harmless and
+     correct on Windows/WebView2 too. */
+  color-scheme: dark;
   --bg: #1e1e2e;
   --panel: #252535;
   --card: #2a2a3e;
@@ -19,6 +23,18 @@
   --border: #374151;
   --entry-bg: #1a1a2e;
   --sep: #3f3f5a;
+}
+
+/* Native dropdowns: keep the control and its option popup on-theme.
+   WebKitGTK ignores background on selects without color-scheme above. */
+select {
+  background-color: var(--entry-bg);
+  color: var(--text);
+}
+
+select option {
+  background-color: var(--entry-bg);
+  color: var(--text);
 }
 
 * {

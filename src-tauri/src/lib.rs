@@ -56,8 +56,11 @@ pub fn run() {
                     tauri::LogicalSize { width: 860.0, height: 1000.0 },
                 ));
                 let _ = window.center();
-                // Open devtools in debug builds
-                #[cfg(debug_assertions)]
+                // Open devtools in debug builds. Skipped on Linux: WebKitGTK
+                // opens the inspector with the element-picker active, which
+                // overlays the window and intercepts clicks. Use right-click ->
+                // Inspect Element there instead.
+                #[cfg(all(debug_assertions, not(target_os = "linux")))]
                 window.open_devtools();
             }
 

@@ -24,3 +24,7 @@ dist/
 src-tauri/resources/*.exe
 src-tauri/resources/*.dll
 src-tauri/resources/*.bin
+
+# Runtime data written by the embedded backend at dev time (SQLite db + logs).
+# On Linux data_dir resolves to ./data relative to CWD (= src-tauri/ under dev).
+src-tauri/data/

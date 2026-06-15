@@ -61,9 +61,13 @@
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
       const ext = accept.replace(/^\./, '');
+      // Start the picker in the current file's folder so re-selecting a video
+      // from the same directory doesn't require re-navigating from scratch.
+      const startDir = filePath ? filePath.replace(/[/\\][^/\\]*$/, '') : undefined;
       const selected = await open({
         multiple: false,
         directory: false,
+        defaultPath: startDir || undefined,
         filters: ext ? [{ name: ext.toUpperCase(), extensions: [ext] }] : undefined,
       });
       if (typeof selected === 'string' && selected) {

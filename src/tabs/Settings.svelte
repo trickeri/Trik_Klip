@@ -389,6 +389,114 @@
       }
     }
   }
+
+  // ── AI Prompt editor target (Premiere | Kdenlive) ──────────────────────
+  let aiEditor: 'kdenlive' | 'premiere' = 'kdenlive';
+
+  interface KClipLayer { label: string; video_track_index: number; rect: [number, number, number, number]; }
+  interface KBanner { label: string; path: string; video_track_index: number; rect: [number, number, number, number]; }
+  interface KdenliveConfig {
+    template_path: string;
+    clip_layers: KClipLayer[];
+    banners: KBanner[];
+  }
+
+  let kdenliveConfig: KdenliveConfig = { template_path: '', clip_layers: [], banners: [] };
+  let kdenliveLoaded = false;
+  let kdenliveSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  onMount(async () => {
+    try {
+      const r = await apiFetch<{ editor: 'kdenlive' | 'premiere' }>('/settings/ai-editor');
+      aiEditor = r.editor;
+    } catch (e: any) {
+      addLog('error', `Failed to load editor preference: ${e.message}`);
+    }
+    try {
+      kdenliveConfig = await apiFetch<KdenliveConfig>('/settings/kdenlive');
+      kdenliveLoaded = true;
+    } catch (e: any) {
+      addLog('error', `Failed to load kdenlive settings: ${e.message}`);
+    }
+  });
+
+  async function saveAiEditor() {
+    try {
+      await apiFetch('/settings/ai-editor', {
+        method: 'PUT',
+        body: JSON.stringify({ editor: aiEditor }),
+      });
+      addLog('info', `AI prompt target set to ${aiEditor === 'kdenlive' ? 'Kdenlive' : 'Premiere'}`);
+    } catch (e: any) {
+      addLog('error', `Save editor preference failed: ${e.message}`);
+    }
+  }
+
+  function scheduleKdenliveSave() {
+    if (!kdenliveLoaded) return;
+    if (kdenliveSaveTimer) clearTimeout(kdenliveSaveTimer);
+    kdenliveSaveTimer = setTimeout(saveKdenliveConfig, 400);
+  }
+
+  async function saveKdenliveConfig() {
+    try {
+      await apiFetch('/settings/kdenlive', {
+        method: 'PUT',
+        body: JSON.stringify(kdenliveConfig),
+      });
+    } catch (e: any) {
+      addLog('error', `Save kdenlive settings failed: ${e.message}`);
+    }
+  }
+
+  async function browseKTemplate() {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Kdenlive project', extensions: ['kdenlive'] }],
+      });
+      if (typeof selected === 'string' && selected) {
+        kdenliveConfig.template_path = selected;
+        kdenliveConfig = kdenliveConfig;
+        scheduleKdenliveSave();
+      }
+    } catch (e: any) {
+      addLog('error', `File picker failed: ${e.message || e}`);
+    }
+  }
+
+  async function browseKBanner(idx: number) {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Image', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+      });
+      if (typeof selected === 'string' && selected) {
+        kdenliveConfig.banners[idx].path = selected;
+        kdenliveConfig = kdenliveConfig;
+        scheduleKdenliveSave();
+      }
+    } catch (e: any) {
+      addLog('error', `File picker failed: ${e.message || e}`);
+    }
+  }
+
+  function addKBanner() {
+    kdenliveConfig.banners = [
+      ...kdenliveConfig.banners,
+      { label: 'Banner', path: '', video_track_index: kdenliveConfig.banners.length + 3, rect: [0, 1760, 1080, 100] },
+    ];
+    scheduleKdenliveSave();
+  }
+
+  function removeKBanner(idx: number) {
+    kdenliveConfig.banners = kdenliveConfig.banners.filter((_, i) => i !== idx);
+    scheduleKdenliveSave();
+  }
 </script>
 
 <div class="tab-content">
@@ -413,6 +521,11 @@
     <h4 class="card-title">Active Model Profile</h4>
     <div class="active-profile-row">
       <select bind:value={selectedProfileId} on:change={() => {
+        if (selectedProfileId === '__new__') {
+          // Reset the editor to a blank, create-mode profile.
+          startCreate();
+          return;
+        }
         const p = profiles.find(pr => pr.id === selectedProfileId);
         if (p) {
           selectProfile(p);
@@ -420,6 +533,7 @@
         }
       }}>
         <option value="">Select profile...</option>
+        <option value="__new__">+ New profile...</option>
         {#each profiles as profile}
           <option value={profile.id}>{profile.name} ({providerLabel(profile.provider)})</option>
         {/each}
@@ -431,9 +545,6 @@
   <div class="card">
     <div class="card-header">
       <h4 class="card-title">Profile Editor</h4>
-      {#if !creating}
-        <button class="btn btn-small btn-secondary" on:click={startCreate}>+ New</button>
-      {/if}
     </div>
 
     {#if loading}
@@ -529,11 +640,20 @@
       aria-expanded={premiereOpen}
     >
       <span class="chev">{premiereOpen ? '▼' : '▶'}</span>
-      <h4 class="card-title">Premiere Prompt Settings</h4>
+      <h4 class="card-title">AI Prompt Settings</h4>
     </button>
 
     {#if premiereOpen}
       <div class="premiere-body">
+        <div class="form-row-inline">
+          <span class="row-label">Editor</span>
+          <select bind:value={aiEditor} on:change={saveAiEditor}>
+            <option value="kdenlive">Kdenlive (Nuldrums fork)</option>
+            <option value="premiere">Adobe Premiere</option>
+          </select>
+        </div>
+
+        {#if aiEditor === 'premiere'}
         <p class="dim-text">
           Customize what goes into the Premiere setup prompt so it matches
           your machine instead of hard-coded paths.
@@ -660,6 +780,73 @@
             <p class="dim-text">No position overrides.</p>
           {/if}
         </div>
+        {:else}
+        <!-- Kdenlive config -->
+        <p class="dim-text">
+          Customize the Kdenlive setup prompt (Nuldrums fork, driven over D-Bus).
+          The default layer rects replicate Troy's Premiere shorts template.
+        </p>
+
+        <div class="sub-section">
+          <span class="sub-title">Shorts template project</span>
+          <p class="hint-text">
+            The 1080×1920 30fps <code>.kdenlive</code> file Step 1 copies into each clip folder.
+          </p>
+          <div class="banner-row">
+            <input
+              type="text"
+              class="banner-path"
+              bind:value={kdenliveConfig.template_path}
+              placeholder="Path to shorts template .kdenlive"
+              on:input={scheduleKdenliveSave}
+            />
+            <button class="btn btn-small btn-secondary" on:click={browseKTemplate}>Browse</button>
+          </div>
+        </div>
+
+        <div class="sub-section">
+          <span class="sub-title">Clip layers (qtblend rects)</span>
+          <p class="hint-text">
+            Stacked copies of the main clip. Rect is x y w h (top-left origin, project px).
+          </p>
+          {#each kdenliveConfig.clip_layers as layer}
+            <div class="pos-row">
+              <input type="number" class="pos-track" bind:value={layer.video_track_index} on:input={scheduleKdenliveSave} min={1} title="Video track (V#)" />
+              <input type="text" class="pos-label" bind:value={layer.label} on:input={scheduleKdenliveSave} placeholder="Label" />
+              <input type="number" class="pos-xy" bind:value={layer.rect[0]} on:input={scheduleKdenliveSave} title="x" placeholder="x" />
+              <input type="number" class="pos-xy" bind:value={layer.rect[1]} on:input={scheduleKdenliveSave} title="y" placeholder="y" />
+              <input type="number" class="pos-xy" bind:value={layer.rect[2]} on:input={scheduleKdenliveSave} title="w" placeholder="w" />
+              <input type="number" class="pos-xy" bind:value={layer.rect[3]} on:input={scheduleKdenliveSave} title="h" placeholder="h" />
+            </div>
+          {/each}
+        </div>
+
+        <div class="sub-section">
+          <div class="sub-header">
+            <span class="sub-title">Banner overlays</span>
+            <button class="btn btn-small btn-secondary" on:click={addKBanner}>+ Add banner</button>
+          </div>
+          <p class="hint-text">Imported and placed on their own track per clip. Rect is x y w h.</p>
+          {#each kdenliveConfig.banners as banner, i}
+            <div class="banner-row">
+              <input type="text" class="banner-label" bind:value={banner.label} on:input={scheduleKdenliveSave} placeholder="Label" />
+              <input type="text" class="banner-path" bind:value={banner.path} on:input={scheduleKdenliveSave} placeholder="Path to banner image" />
+              <button class="btn btn-small btn-secondary" on:click={() => browseKBanner(i)}>Browse</button>
+              <button class="btn-remove" title="Remove" on:click={() => removeKBanner(i)}>×</button>
+            </div>
+            <div class="pos-row">
+              <input type="number" class="pos-track" bind:value={banner.video_track_index} on:input={scheduleKdenliveSave} min={1} title="Video track (V#)" />
+              <input type="number" class="pos-xy" bind:value={banner.rect[0]} on:input={scheduleKdenliveSave} title="x" placeholder="x" />
+              <input type="number" class="pos-xy" bind:value={banner.rect[1]} on:input={scheduleKdenliveSave} title="y" placeholder="y" />
+              <input type="number" class="pos-xy" bind:value={banner.rect[2]} on:input={scheduleKdenliveSave} title="w" placeholder="w" />
+              <input type="number" class="pos-xy" bind:value={banner.rect[3]} on:input={scheduleKdenliveSave} title="h" placeholder="h" />
+            </div>
+          {/each}
+          {#if kdenliveConfig.banners.length === 0}
+            <p class="dim-text">No banners configured.</p>
+          {/if}
+        </div>
+        {/if}
       </div>
     {/if}
   </div>

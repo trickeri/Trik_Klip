@@ -66,12 +66,12 @@ impl std::error::Error for CodexError {}
 // CLI helpers
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "windows")]
 fn which(name: &str) -> Option<String> {
     let mut cmd = std::process::Command::new("where");
     cmd.arg(name);
     // Suppress the per-invocation console flash on Windows (same reason as the
     // Claude CLI provider — this runs per chunk per worker during analysis).
-    #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -88,6 +88,23 @@ fn which(name: &str) -> Option<String> {
     } else {
         Some(first.to_string())
     }
+}
+
+// Unix has no `where` command — scan PATH directly for an executable file.
+// See claude_cli::which for rationale.
+#[cfg(not(target_os = "windows"))]
+fn which(name: &str) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if let Ok(meta) = std::fs::metadata(&candidate) {
+            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
 }
 
 /// Resolve the native `codex.exe` that npm's `.cmd` shim ultimately launches.

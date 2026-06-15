@@ -158,12 +158,12 @@
       // Primary UX: copy to clipboard. Also written to disk as a backup.
       try {
         await navigator.clipboard.writeText(res.prompt);
-        addLog('info', `Premiere prompt copied to clipboard (also saved to ${res.path})`);
+        addLog('info', `AI prompt copied to clipboard (also saved to ${res.path})`);
       } catch {
         addLog('warn', `Clipboard copy failed — prompt saved to ${res.path}`);
       }
     } catch (e: any) {
-      addLog('error', `Premiere prompt failed: ${e.message}`);
+      addLog('error', `AI prompt failed: ${e.message}`);
     }
   }
 
@@ -281,7 +281,7 @@
               on:click={() => writePremierePrompt(entry)}
               disabled={$pipelineRunning}
             >
-              Premiere Prompt
+              AI Prompt
             </button>
           </div>
 

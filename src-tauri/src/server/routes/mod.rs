@@ -42,10 +42,19 @@ pub fn build_routes() -> Router<Arc<AppState>> {
         .route("/api/pipeline/load-saved", post(load_saved_clips))
         .route("/api/pipeline/slices", post(pipeline_slices))
         .route("/api/slices/clips", get(list_clip_folders))
-        .route("/api/slices/premiere-prompt", post(write_premiere_prompt))
+        .route("/api/slices/premiere-prompt", post(write_ai_prompt))
+        .route("/api/slices/ai-prompt", post(write_ai_prompt))
         .route(
             "/api/settings/premiere",
             get(get_premiere_settings).put(put_premiere_settings),
+        )
+        .route(
+            "/api/settings/kdenlive",
+            get(get_kdenlive_settings).put(put_kdenlive_settings),
+        )
+        .route(
+            "/api/settings/ai-editor",
+            get(get_ai_editor).put(put_ai_editor),
         )
         .route("/api/pipeline/cancel", post(pipeline_cancel))
         .route("/api/pipeline/status", get(pipeline_status))
@@ -417,7 +426,19 @@ fn extract_clip_number(folder: &str) -> Option<u32> {
 }
 
 
-async fn write_premiere_prompt(
+const AI_EDITOR_KEY: &str = "ai_prompt_editor";
+
+/// Stored editor preference ("kdenlive" | "premiere"). Defaults to "kdenlive".
+async fn load_ai_editor(pool: &sqlx::SqlitePool) -> String {
+    match db::get_system_state(pool, AI_EDITOR_KEY).await {
+        Ok(Some(v)) if v == "premiere" || v == "kdenlive" => v,
+        _ => "kdenlive".to_string(),
+    }
+}
+
+/// Generate the editor-specific setup prompt for a clip folder. The target
+/// editor (Premiere or the Kdenlive fork) comes from the stored preference.
+async fn write_ai_prompt(
     State(state): State<Arc<AppState>>,
     Json(body): Json<PremierePromptRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -438,20 +459,77 @@ async fn write_premiere_prompt(
         None => format!("{}_Shorts", folder_name),
     };
 
-    let cfg = crate::server::premiere::load_config(&state.db)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to load premiere config: {}", e)))?;
-    let prompt = crate::server::premiere::build_prompt(&cfg, &body.clip_dir, &seq_name);
+    let editor = load_ai_editor(&state.db).await;
 
-    let out_path = clip_dir.join("premiere_setup_prompt.md");
+    let (prompt, out_path) = if editor == "kdenlive" {
+        let cfg = crate::server::kdenlive::load_config(&state.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to load kdenlive config: {}", e)))?;
+        let prompt = crate::server::kdenlive::build_prompt(
+            &cfg,
+            &body.clip_dir,
+            &seq_name,
+            &cfg.template_path,
+        );
+        (prompt, clip_dir.join("kdenlive_setup_prompt.md"))
+    } else {
+        let cfg = crate::server::premiere::load_config(&state.db)
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to load premiere config: {}", e)))?;
+        let prompt = crate::server::premiere::build_prompt(&cfg, &body.clip_dir, &seq_name);
+        (prompt, clip_dir.join("premiere_setup_prompt.md"))
+    };
+
     let _ = std::fs::write(&out_path, &prompt);
 
     Ok(Json(json!({
         "status": "ok",
+        "editor": editor,
         "path": out_path.to_string_lossy(),
         "prompt": prompt,
         "sequence_name": seq_name,
     })))
+}
+
+#[derive(Deserialize)]
+struct AiEditorRequest {
+    editor: String,
+}
+
+async fn get_ai_editor(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    Json(json!({ "editor": load_ai_editor(&state.db).await }))
+}
+
+async fn put_ai_editor(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AiEditorRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let editor = if body.editor == "premiere" { "premiere" } else { "kdenlive" };
+    db::set_system_state(&state.db, AI_EDITOR_KEY, editor)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to save editor preference: {}", e)))?;
+    Ok(Json(json!({ "status": "ok", "editor": editor })))
+}
+
+async fn get_kdenlive_settings(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<crate::server::kdenlive::KdenliveConfig>, AppError> {
+    let cfg = crate::server::kdenlive::load_config(&state.db)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to load kdenlive config: {}", e)))?;
+    Ok(Json(cfg))
+}
+
+async fn put_kdenlive_settings(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<crate::server::kdenlive::KdenliveConfig>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    crate::server::kdenlive::save_config(&state.db, &body)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to save kdenlive config: {}", e)))?;
+    Ok(Json(json!({"status": "ok"})))
 }
 
 async fn get_premiere_settings(
@@ -858,6 +936,18 @@ async fn verify_license_handler(
 async fn verify_saved_license_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // Dev builds skip licensing entirely so the app is usable without a key.
+    // Release builds (shipped to customers) keep the real Gumroad check.
+    #[cfg(debug_assertions)]
+    {
+        let _ = &state;
+        return Ok(Json(json!({
+            "valid": true,
+            "message": "Development build — license check bypassed.",
+        })));
+    }
+    #[cfg(not(debug_assertions))]
+    {
     let saved_key = licensing::load_saved_license();
     match saved_key {
         Some(key) => {
@@ -873,9 +963,20 @@ async fn verify_saved_license_handler(
             "message": "No saved license key found.",
         }))),
     }
+    }
 }
 
 async fn license_status() -> Json<serde_json::Value> {
+    // Dev builds report a license present so the gate's auto-check passes.
+    #[cfg(debug_assertions)]
+    {
+        return Json(json!({
+            "has_license": true,
+            "license_key_preview": "DEV-BUILD",
+        }));
+    }
+    #[cfg(not(debug_assertions))]
+    {
     let saved = licensing::load_saved_license();
     Json(json!({
         "has_license": saved.is_some(),
@@ -887,6 +988,7 @@ async fn license_status() -> Json<serde_json::Value> {
             }
         }),
     }))
+    }
 }
 
 // ---------------------------------------------------------------------------

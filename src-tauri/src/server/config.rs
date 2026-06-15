@@ -49,7 +49,7 @@ impl Settings {
             ffprobe_path: env_or("FFPROBE_PATH", "ffprobe"),
             whisper_cli_path: env_or(
                 "WHISPER_CLI_PATH",
-                &resources_dir.join("whisper-cli.exe").to_string_lossy(),
+                &resources_dir.join(WHISPER_CLI_BIN).to_string_lossy(),
             ),
             whisper_model_path: env_or(
                 "WHISPER_MODEL_PATH",
@@ -115,3 +115,10 @@ impl Settings {
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
+
+/// Bundled whisper-cli executable name. Windows ships `whisper-cli.exe`;
+/// other platforms use the extensionless binary.
+#[cfg(target_os = "windows")]
+const WHISPER_CLI_BIN: &str = "whisper-cli.exe";
+#[cfg(not(target_os = "windows"))]
+const WHISPER_CLI_BIN: &str = "whisper-cli";

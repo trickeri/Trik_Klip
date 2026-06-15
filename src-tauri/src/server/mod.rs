@@ -1,5 +1,6 @@
 pub mod config;
 pub mod error;
+pub mod kdenlive;
 pub mod pipeline;
 pub mod premiere;
 pub mod routes;

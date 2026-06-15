@@ -1,0 +1,5 @@
+# Runtime data (SQLite db + rolling logs) written by the embedded backend at
+# dev time. data_dir resolves to ./data relative to CWD (= src-tauri/ under
+# `tauri dev`), so without this the watcher restarts the app in an infinite
+# loop on every db/log write.
+data/

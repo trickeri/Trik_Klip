@@ -58,13 +58,13 @@ impl std::error::Error for CliError {}
 // CLI helpers
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "windows")]
 fn which(name: &str) -> Option<String> {
     let mut cmd = std::process::Command::new("where");
     cmd.arg(name);
     // Without CREATE_NO_WINDOW, each `where.exe` invocation flashes a console
     // window that steals focus — and analysis spawns this per chunk per
     // worker. Suppress the window.
-    #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -81,6 +81,25 @@ fn which(name: &str) -> Option<String> {
     } else {
         Some(first.to_string())
     }
+}
+
+// Unix has no `where` command (that's Windows-only; the shell builtins of the
+// same name aren't exec-able). Scan PATH directly for an executable file —
+// robust and dependency-free, and follows symlinks (the claude binary is
+// typically a symlink into a versioned install dir).
+#[cfg(not(target_os = "windows"))]
+fn which(name: &str) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if let Ok(meta) = std::fs::metadata(&candidate) {
+            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
 }
 
 fn find_claude_uncached() -> Option<String> {
