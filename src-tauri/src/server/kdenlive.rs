@@ -38,6 +38,14 @@ pub struct BannerEntry {
     pub path: String,  // absolute file path; may be empty until the user sets it
     pub video_track_index: u32,
     pub rect: [i64; 4],
+    /// Timeline placement + opacity fade, all in frames @ the project fps (30).
+    /// start_frame: where the banner begins on the timeline; duration_frames: how
+    /// long it stays; fade_in_frames / fade_out_frames: opacity ramps at the
+    /// banner's start / end (0 = no fade on that edge).
+    pub start_frame: i64,
+    pub duration_frames: i64,
+    pub fade_in_frames: i64,
+    pub fade_out_frames: i64,
 }
 
 impl Default for KdenliveConfig {
@@ -63,17 +71,28 @@ impl Default for KdenliveConfig {
                 },
             ],
             banners: vec![
-                BannerEntry {
-                    label: "Twitch banner".into(),
-                    path: String::new(),
-                    video_track_index: 3,
-                    rect: [0, 1760, 1080, 100],
-                },
+                // YouTube shows first: solid 0-5s, then a 1s fade-out (6s total).
                 BannerEntry {
                     label: "YouTube banner".into(),
                     path: String::new(),
                     video_track_index: 4,
                     rect: [0, 1760, 1080, 100],
+                    start_frame: 0,
+                    duration_frames: 180, // 6s @30fps
+                    fade_in_frames: 0,
+                    fade_out_frames: 30, // 1s fade-out at the 5s mark
+                },
+                // Twitch takes over at the 5s mark: fades in over 1s, runs to the
+                // 60s mark (typical Shorts length).
+                BannerEntry {
+                    label: "Twitch banner".into(),
+                    path: String::new(),
+                    video_track_index: 3,
+                    rect: [0, 1760, 1080, 100],
+                    start_frame: 150,      // 5s @30fps
+                    duration_frames: 1650, // 5s -> 60s
+                    fade_in_frames: 30,    // 1s fade-in (crossfades with YouTube's fade-out)
+                    fade_out_frames: 0,
                 },
             ],
         }
@@ -129,16 +148,25 @@ folder) plus slice_*.mp4 and visual_*.{jpg,png,webp} files.
 
 CLIP FOLDER PATH: {clip_folder}
 
-Step 1 — Open a vertical project
-Copy the shorts template project into the clip folder named after the folder,
-then open it:
-  cp "{template_path}" "{clip_folder}/{sequence_name}.kdenlive"
+Step 1 — Create a vertical project FROM SCRATCH (no template)
+Launch Kdenlive offscreen with no document, wait for the scripting service, then
+create a new project on the Vertical HD 30fps preset and save it into the clip
+folder. Discover the MLT profile path with a glob so it survives MLT version bumps:
   rm -f /tmp/kdenlivelock
-  QT_QPA_PLATFORM=offscreen setsid kdenlive "{clip_folder}/{sequence_name}.kdenlive" >/tmp/kdenlive.log 2>&1 < /dev/null &
-Wait until the service appears, then confirm the profile:
+  QT_QPA_PLATFORM=offscreen setsid kdenlive --no-welcome >/tmp/kdenlive.log 2>&1 < /dev/null &
   until qdbus6 2>/dev/null | grep -q org.kde.kdenlive.scripting; do sleep 1; done
+  PROFILE=$(ls /usr/share/mlt*/profiles/vertical_hd_30 2>/dev/null | head -1)
+  qdbus6 org.kde.kdenlive.scripting /kdenlive newProject "$PROFILE" "{clip_folder}/{sequence_name}.kdenlive"
   qdbus6 org.kde.kdenlive.scripting /kdenlive projectInfo
-projectInfo must report width=1080 height=1920 fps=30 docOpen=true.
+projectInfo must report width=1080 height=1920 fps=30 docOpen=true. If width/height
+are swapped or fps is wrong, $PROFILE was empty — find the correct vertical 1080x1920
+30fps profile under /usr/share/mlt*/profiles and re-run newProject before continuing.
+
+Step 1b — Ensure enough video tracks
+A fresh project may have fewer than the {needed_tracks} video tracks this layout
+needs. Add tracks until there are enough:
+  while [ "$(qdbus6 org.kde.kdenlive.scripting /kdenlive videoTrackCount)" -lt {needed_tracks} ]; do
+    qdbus6 org.kde.kdenlive.scripting /kdenlive addVideoTrack; done
 
 Step 2 — Import the main clip
   qdbus6 org.kde.kdenlive.scripting /kdenlive importClip "{clip_folder}/MAIN.mp4"
@@ -206,21 +234,38 @@ pub fn build_prompt(cfg: &KdenliveConfig, clip_folder: &str, sequence_name: &str
     // Visual B-roll track = first free track above the clip layers.
     let max_clip_track = cfg.clip_layers.iter().map(|l| l.video_track_index).max().unwrap_or(2);
     let visual_track = max_clip_track + 1;
+    // Highest video track index any element lands on -> how many tracks the fresh
+    // project must have before we start placing clips.
+    let needed_tracks = cfg
+        .clip_layers
+        .iter()
+        .map(|l| l.video_track_index)
+        .chain(banners.iter().map(|b| b.video_track_index))
+        .chain(std::iter::once(visual_track))
+        .max()
+        .unwrap_or(visual_track);
 
-    // Banner steps — import, place, transform per configured banner.
+    // Banner steps — import, place at start_frame, stretch to duration, then apply
+    // the rect + opacity fade. setClipFade keeps position/size fixed at x,y,w,h and
+    // ramps opacity at the clip edges, so the two banners crossfade at the handoff.
     let mut banner_steps = String::new();
     let mut step_num = 6;
     for banner in &banners {
         let [x, y, w, h] = banner.rect;
         banner_steps.push_str(&format!(
-            "Step {step} — Add {label}\n\
+            "Step {step} — Add {label} (start {start}f, {dur}f long, fade in {fin}f / out {fout}f)\n\
              * importClip \"{path}\"\n\
-             * addClipToTrack \"{path}\" {track} 0  (poll until positive id)\n\
-             * id=$(clipIdsOnTrack {track}); setClipTransform $id {x} {y} {w} {h}\n\n",
+             * addClipToTrack \"{path}\" {track} {start}  (poll until positive id)\n\
+             * id=$(clipIdsOnTrack {track}); resizeClip $id {dur}\n\
+             * setClipFade $id {x} {y} {w} {h} {fin} {fout}\n\n",
             step = step_num,
             label = banner.label,
             path = banner.path,
             track = banner.video_track_index,
+            start = banner.start_frame,
+            dur = banner.duration_frames,
+            fin = banner.fade_in_frames,
+            fout = banner.fade_out_frames,
             x = x,
             y = y,
             w = w,
@@ -247,6 +292,7 @@ pub fn build_prompt(cfg: &KdenliveConfig, clip_folder: &str, sequence_name: &str
         .replace("{clip_folder}", &clip_folder)
         .replace("{sequence_name}", sequence_name)
         .replace("{template_path}", template_path)
+        .replace("{needed_tracks}", &needed_tracks.to_string())
         .replace("{clip_layer_steps}", clip_layer_steps.trim_end())
         .replace("{clip_layer_transforms}", clip_layer_transforms.trim_end())
         .replace("{visual_track}", &visual_track.to_string())

@@ -394,7 +394,17 @@
   let aiEditor: 'kdenlive' | 'premiere' = 'kdenlive';
 
   interface KClipLayer { label: string; video_track_index: number; rect: [number, number, number, number]; }
-  interface KBanner { label: string; path: string; video_track_index: number; rect: [number, number, number, number]; }
+  interface KBanner {
+    label: string;
+    path: string;
+    video_track_index: number;
+    rect: [number, number, number, number];
+    // Timeline placement + opacity fade, in frames @ project fps (30).
+    start_frame: number;
+    duration_frames: number;
+    fade_in_frames: number;
+    fade_out_frames: number;
+  }
   interface KdenliveConfig {
     template_path: string;
     clip_layers: KClipLayer[];
@@ -488,7 +498,16 @@
   function addKBanner() {
     kdenliveConfig.banners = [
       ...kdenliveConfig.banners,
-      { label: 'Banner', path: '', video_track_index: kdenliveConfig.banners.length + 3, rect: [0, 1760, 1080, 100] },
+      {
+        label: 'Banner',
+        path: '',
+        video_track_index: kdenliveConfig.banners.length + 3,
+        rect: [0, 1760, 1080, 100],
+        start_frame: 0,
+        duration_frames: 180,
+        fade_in_frames: 0,
+        fade_out_frames: 0,
+      },
     ];
     scheduleKdenliveSave();
   }
@@ -840,6 +859,13 @@
               <input type="number" class="pos-xy" bind:value={banner.rect[1]} on:input={scheduleKdenliveSave} title="y" placeholder="y" />
               <input type="number" class="pos-xy" bind:value={banner.rect[2]} on:input={scheduleKdenliveSave} title="w" placeholder="w" />
               <input type="number" class="pos-xy" bind:value={banner.rect[3]} on:input={scheduleKdenliveSave} title="h" placeholder="h" />
+            </div>
+            <div class="pos-row">
+              <span class="hint-text">frames @30fps:</span>
+              <input type="number" class="pos-xy" bind:value={banner.start_frame} on:input={scheduleKdenliveSave} title="start frame" placeholder="start" />
+              <input type="number" class="pos-xy" bind:value={banner.duration_frames} on:input={scheduleKdenliveSave} title="duration (frames)" placeholder="dur" />
+              <input type="number" class="pos-xy" bind:value={banner.fade_in_frames} on:input={scheduleKdenliveSave} title="fade in (frames)" placeholder="fade in" />
+              <input type="number" class="pos-xy" bind:value={banner.fade_out_frames} on:input={scheduleKdenliveSave} title="fade out (frames)" placeholder="fade out" />
             </div>
           {/each}
           {#if kdenliveConfig.banners.length === 0}
