@@ -155,12 +155,12 @@ folder. Discover the MLT profile path with a glob so it survives MLT version bum
   rm -f /tmp/kdenlivelock
   QT_QPA_PLATFORM=offscreen setsid kdenlive --no-welcome >/tmp/kdenlive.log 2>&1 < /dev/null &
   until qdbus6 2>/dev/null | grep -q org.kde.kdenlive.scripting; do sleep 1; done
-  PROFILE=$(ls /usr/share/mlt*/profiles/vertical_hd_30 2>/dev/null | head -1)
-  qdbus6 org.kde.kdenlive.scripting /kdenlive newProject "$PROFILE" "{clip_folder}/{sequence_name}.kdenlive"
+  qdbus6 org.kde.kdenlive.scripting /kdenlive newProject "vertical_hd_30" "{clip_folder}/{sequence_name}.kdenlive"
   qdbus6 org.kde.kdenlive.scripting /kdenlive projectInfo
-projectInfo must report width=1080 height=1920 fps=30 docOpen=true. If width/height
-are swapped or fps is wrong, $PROFILE was empty — find the correct vertical 1080x1920
-30fps profile under /usr/share/mlt*/profiles and re-run newProject before continuing.
+newProject takes the BARE MLT profile name ("vertical_hd_30"), NOT a full path —
+ProfileRepository keys MLT profiles by filename, so a path silently falls back to
+the default HD profile. projectInfo must report width=1080 height=1920 fps=30
+docOpen=true; if it reports 1920x1080/29.97 the profile name was wrong.
 
 Step 1b — Ensure enough video tracks
 A fresh project may have fewer than the {needed_tracks} video tracks this layout
